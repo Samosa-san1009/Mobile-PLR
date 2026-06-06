@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────
+#  PLR Pupillometry System — Python Dependencies
+#  Raspberry Pi 4 (Raspberry Pi OS Bookworm or newer)
+# ─────────────────────────────────────────────────────────────
+
+# GPIO + PWM for the two RGB LEDs
+RPi.GPIO >= 0.7.1
+
+# HTTP server (mobile app ↔ Pi) — kept tiny to suit Pi 4 without cooler
+Flask >= 2.3.0
+
+# HTTP client used by ModelCaller in live mode
+requests >= 2.28.0
+
+# ─────────────────────────────────────────────────────────────
+#  IR Pi Camera Module (CSI ribbon) — picamera2
+#
+#  picamera2 is installed via APT, NOT pip, on Raspberry Pi OS:
+#      sudo apt install -y python3-picamera2 python3-libcamera
+#
+#  This pulls in libcamera and the H264 hardware encoder used by
+#  camera_controller.py.
+# ─────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────
+#  OS-level dependency (apt, not pip):
+#      sudo apt install ffmpeg
+#  ffmpeg is used by segmenter.py to cut per-flash clips
+#  and by picamera2 to mux H.264 into an MP4 container.
+# ─────────────────────────────────────────────────────────────

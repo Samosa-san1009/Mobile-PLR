@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Backend runtime artifacts
+backend/recordings/
+backend/clips/
+backend/results/
+
+# Node / React Native
+node_modules/
+mobile/node_modules/
+*.log
+.expo/
+
+# iOS
+mobile/ios/Pods/
+mobile/ios/build/
+mobile/ios/*.xcworkspace/xcuserdata/
+
+# Android
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+*.keystore
+
+# Editor
+.vscode/
+.idea/

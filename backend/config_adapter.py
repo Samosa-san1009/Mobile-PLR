@@ -1,0 +1,121 @@
+"""
+config_adapter.py
+-----------------
+Translates the mobile-app (Eyezer) request payload into the
+backend config dict expected by Orchestrator + LedController.
+
+Mobile request shape (JSON from ConfigScreen):
+    {
+        "participant": { "name": str, "age": int, "sex": str },
+        "eye":         "Left" | "Right" | "Both",
+        "color":       "Red" | "Green" | "Blue" | "Yellow" | "White" | "All",
+        "iterations":  int,     # number of flashes per color
+        "duration":    float,   # seconds, flash on-time
+        "delay":       float,   # seconds, gap between flashes
+        "intensity":   float,   # 0..100 percent (PWM duty)
+        "gpio":        { ...optional pin overrides... },
+        "common_anode": bool | { "led1": bool, "led2": bool }
+    }
+
+Backend config shape (what Orchestrator wants):
+    {
+        led1_r, led1_g, led1_b, led2_r, led2_g, led2_b: int,
+        common_anode | common_anode_led1/led2: bool,
+        mode: "dual" | "left_to_right" | "right_to_left",
+        schedule: {
+            flashes: [ {hex, duration_ms, intensity_pct}, ... ],   # dual
+              or
+            rounds, hex, duration_ms, intensity_pct,
+            inner_pause_ms, gap_ms                                 # sequential
+        },
+        camera: { output_dir: str }
+    }
+"""
+
+from led_controller import DEFAULT_PINS, DEFAULT_COMMON_ANODE
+
+
+COLOR_HEX = {
+    "Red":    "#FF0000",
+    "Green":  "#00FF00",
+    "Blue":   "#0000FF",
+    "Yellow": "#FFFF00",
+    "White":  "#FFFFFF",
+}
+
+# Order used when "All" is requested — same set the eyezer UI offers.
+ALL_COLORS = ["Red", "Green", "Blue", "Yellow", "White"]
+
+
+def adapt(payload: dict) -> dict:
+    eye        = payload.get("eye", "Left")
+    color      = payload.get("color", "White")
+    iterations = max(1, int(payload.get("iterations", 1)))
+    duration_s = float(payload.get("duration", 1.0))
+    delay_s    = float(payload.get("delay", 1.0))
+    intensity  = float(payload.get("intensity", 100.0))
+
+    duration_ms = max(50, int(duration_s * 1000))
+    gap_ms      = max(50, int(delay_s    * 1000))
+
+    # ── GPIO + wiring ────────────────────────────────────────────────────────
+    gpio_in = payload.get("gpio") or {}
+    pins = {k: int(gpio_in.get(k, DEFAULT_PINS[k])) for k in DEFAULT_PINS}
+
+    ca_in = payload.get("common_anode", False)
+    if isinstance(ca_in, dict):
+        wiring = {
+            "common_anode_led1": bool(ca_in.get("led1", DEFAULT_COMMON_ANODE["led1"])),
+            "common_anode_led2": bool(ca_in.get("led2", DEFAULT_COMMON_ANODE["led2"])),
+        }
+    else:
+        wiring = {"common_anode": bool(ca_in)}
+
+    # ── Mode ─────────────────────────────────────────────────────────────────
+    if eye == "Both":
+        mode = "dual"
+    elif eye == "Right":
+        mode = "right_to_left"   # right LED only — sequential w/ rounds=iter
+    else:
+        mode = "left_to_right"   # default = Left
+
+    # ── Schedule ─────────────────────────────────────────────────────────────
+    colors = ALL_COLORS if color == "All" else [color]
+
+    if mode == "dual":
+        flashes = []
+        for c in colors:
+            for _ in range(iterations):
+                flashes.append({
+                    "hex":           COLOR_HEX[c],
+                    "duration_ms":   duration_ms,
+                    "intensity_pct": intensity,
+                })
+        schedule = {"flashes": flashes, "gap_ms": gap_ms}
+    else:
+        # Sequential modes use a single color per round. When "All" is
+        # selected we still loop colors round-by-round.
+        # Total rounds = iterations × len(colors); each round uses one color.
+        # We achieve this by replicating the schedule with a colors list.
+        schedule = {
+            "rounds":          iterations * len(colors),
+            "colors_cycle":    [COLOR_HEX[c] for c in colors],   # orchestrator may consume
+            "hex":             COLOR_HEX[colors[0]],             # backwards-compat single color
+            "duration_ms":     duration_ms,
+            "intensity_pct":   intensity,
+            "inner_pause_ms":  max(50, gap_ms // 2),
+            "gap_ms":          gap_ms,
+            # Sequential mode in current orchestrator fires both LEDs per round.
+            # For single-eye intent we mark which side is active; the other side
+            # will be skipped (orchestrator change handles this).
+            "active_led":      1 if mode == "left_to_right" else 2,
+        }
+
+    return {
+        **pins,
+        **wiring,
+        "mode":     mode,
+        "schedule": schedule,
+        "camera":   {"output_dir": "recordings"},
+        "participant": payload.get("participant", {}),
+    }
