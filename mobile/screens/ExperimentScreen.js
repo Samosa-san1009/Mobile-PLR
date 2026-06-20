@@ -21,10 +21,7 @@ export function ExperimentScreen({navigation, route}) {
         const s = await getStatus();
         stage = s.stage;
       } catch (e) {
-        // The Pi shuts down its HTTP listener once it starts running the
-        // model (so the cooler-less Pi 4 can spend full CPU on inference).
-        // A fetch failure here usually means we're in that gap — keep polling
-        // /results instead.
+        // Treat transient LAN errors as retryable while the Pi is working.
         stage = STAGE.INFERENCE;
       }
 
@@ -41,7 +38,7 @@ export function ExperimentScreen({navigation, route}) {
       }
 
       if (stage === STAGE.ERROR) {
-        console.warn('Pi reported error stage');
+        console.warn('Pi reported error stage; inspect the session log on the Pi');
         navigation.goBack();
         return;
       }

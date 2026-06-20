@@ -1,153 +1,161 @@
 """
 led_controller.py
 -----------------
-Controls two 4-pin RGB LEDs via RPi.GPIO software PWM.
+Controls two 4-pin RGB LEDs via GPIO HIGH/LOW.
 
-  Common cathode: duty = intensity        (HIGH side modulated)
-  Common anode  : duty = 100 - intensity  (LOW side modulated, inverted)
+CONFIRMED HARDWARE WIRING:
+  LED1 (left)  — common CATHODE → common pin to GND   → HIGH = ON
+  LED2 (right) — common ANODE   → common pin to 3.3V  → LOW  = ON
 
-PWM frequency is kept low (200 Hz) to minimise Pi 4 CPU usage
-on the cooler-less board — still well above the eye's flicker
-fusion threshold.
+Each LED has its own common_anode flag so they can be wired differently.
+Pins are initialized directly in their OFF state to avoid startup flashes.
 """
 
 import time
 
 try:
     import RPi.GPIO as GPIO
-    _REAL_GPIO = True
 except ImportError:
-    # Mock for development on non-Pi machines
-    class _PWMStub:
-        def __init__(self, *_a, **_kw): pass
-        def start(self, *_a, **_kw): pass
-        def ChangeDutyCycle(self, *_a, **_kw): pass
-        def stop(self): pass
-
     class _GPIO:
         BCM = BOARD = OUT = IN = HIGH = 1
         LOW = 0
-        def setmode(self, m): pass
-        def setup(self, pin, mode): pass
-        def output(self, pin, val): pass
+
+        def setmode(self, mode): pass
+        def setup(self, pin, mode, initial=1): pass
+        def output(self, pin, value): pass
         def cleanup(self): pass
-        def setwarnings(self, v): pass
-        def PWM(self, pin, freq): return _PWMStub()
+        def setwarnings(self, value): pass
+
     GPIO = _GPIO()
-    _REAL_GPIO = False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  GPIO PIN PLACEHOLDERS
-#  Override these from server config / env. Two RGB LEDs, BCM numbering.
-#  Avoid GPIO 0,1 (I2C) and 14,15 (UART).
-# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_CONFIG = {
+    "led1_common_anode": False,
+    "led1_r": 17,
+    "led1_g": 27,
+    "led1_b": 22,
+    "led2_common_anode": True,
+    "led2_r": 23,
+    "led2_g": 24,
+    "led2_b": 25,
+}
+
+# Compatibility aliases used by the mobile config adapter and older callers.
 DEFAULT_PINS = {
-    "led1_r": 17,   # ← placeholder — set in server config per device
-    "led1_g": 27,   # ← placeholder
-    "led1_b": 22,   # ← placeholder
-    "led2_r": 23,   # ← placeholder
-    "led2_g": 24,   # ← placeholder
-    "led2_b": 25,   # ← placeholder
+    key: value for key, value in DEFAULT_CONFIG.items() if key.endswith(("_r", "_g", "_b"))
 }
-
-# Wiring type per LED — can differ between the two LEDs on the same board.
 DEFAULT_COMMON_ANODE = {
-    "led1": False,  # ← placeholder: True = common anode, False = common cathode
-    "led2": False,  # ← placeholder
+    "led1": DEFAULT_CONFIG["led1_common_anode"],
+    "led2": DEFAULT_CONFIG["led2_common_anode"],
 }
-
-PWM_FREQ_HZ = 200   # low CPU, no visible flicker
 
 
 class RGBLed:
-    """Single RGB LED with software-PWM intensity control."""
-
-    def __init__(self, r_pin: int, g_pin: int, b_pin: int,
-                 common_anode: bool = False, name: str = "LED"):
+    def __init__(
+        self,
+        r_pin: int,
+        g_pin: int,
+        b_pin: int,
+        common_anode: bool = False,
+        name: str = "LED",
+    ):
         self.pins = {"r": r_pin, "g": g_pin, "b": b_pin}
         self.common_anode = common_anode
         self.name = name
+        self._setup()
 
-        self._pwm = {}
-        for ch, pin in self.pins.items():
-            GPIO.setup(pin, GPIO.OUT)
-            p = GPIO.PWM(pin, PWM_FREQ_HZ)
-            p.start(self._duty_off())
-            self._pwm[ch] = p
+    def _on_level(self):
+        return GPIO.LOW if self.common_anode else GPIO.HIGH
 
-    def _duty_on(self, intensity_pct: float) -> float:
-        intensity_pct = max(0.0, min(100.0, intensity_pct))
-        return (100.0 - intensity_pct) if self.common_anode else intensity_pct
+    def _off_level(self):
+        return GPIO.HIGH if self.common_anode else GPIO.LOW
 
-    def _duty_off(self) -> float:
-        return 100.0 if self.common_anode else 0.0
+    def _setup(self):
+        off = self._off_level()
+        for pin in self.pins.values():
+            GPIO.setup(pin, GPIO.OUT, initial=off)
 
-    def set_hex(self, hex_color: str, intensity_pct: float = 100.0):
-        """
-        Drive each channel at intensity_pct duty if its hex byte >= 128.
-        Sub-128 channels are driven off.
-        """
-        hex_color = hex_color.lstrip("#")
-        bytes_ = (
-            int(hex_color[0:2], 16),
-            int(hex_color[2:4], 16),
-            int(hex_color[4:6], 16),
-        )
-        for ch, val in zip(("r", "g", "b"), bytes_):
-            duty = self._duty_on(intensity_pct) if val >= 128 else self._duty_off()
-            self._pwm[ch].ChangeDutyCycle(duty)
+    def set_color(self, r: bool, g: bool, b: bool):
+        GPIO.output(self.pins["r"], self._on_level() if r else self._off_level())
+        GPIO.output(self.pins["g"], self._on_level() if g else self._off_level())
+        GPIO.output(self.pins["b"], self._on_level() if b else self._off_level())
+
+    def set_hex(self, hex_color: str):
+        value = hex_color.lstrip("#")
+        if len(value) != 6:
+            raise ValueError(f"Expected six-digit RGB hex color, got {hex_color!r}")
+        red = int(value[0:2], 16) >= 128
+        green = int(value[2:4], 16) >= 128
+        blue = int(value[4:6], 16) >= 128
+        self.set_color(red, green, blue)
 
     def off(self):
-        for p in self._pwm.values():
-            p.ChangeDutyCycle(self._duty_off())
+        off = self._off_level()
+        for pin in self.pins.values():
+            GPIO.output(pin, off)
 
-    def flash(self, hex_color: str, duration_ms: int,
-              intensity_pct: float = 100.0) -> tuple:
-        """Returns (t_on, t_off) Unix timestamps."""
-        self.set_hex(hex_color, intensity_pct)
+    def safe_release(self):
+        self.off()
+
+    def flash(self, hex_color: str, duration_ms: int, brightness: int = 100) -> tuple:
+        """
+        Flash for ``duration_ms`` milliseconds.
+
+        ``brightness`` is accepted for API compatibility but ignored because
+        this timing-safe controller uses direct HIGH/LOW output, not PWM.
+        """
+        self.set_hex(hex_color)
         t_on = time.time()
         time.sleep(duration_ms / 1000.0)
         t_off = time.time()
         self.off()
         return t_on, t_off
 
-    def stop_pwm(self):
-        for p in self._pwm.values():
-            try:
-                p.stop()
-            except Exception:
-                pass
-
 
 class LedController:
-    """Manages both RGB LEDs."""
-
     def __init__(self, config: dict):
-        """
-        Expected config keys (all optional — fall back to placeholders):
-            led1_r, led1_g, led1_b, led2_r, led2_g, led2_b : int (BCM)
-            common_anode      : bool                  (applies to both LEDs)
-              OR
-            common_anode_led1 : bool
-            common_anode_led2 : bool                  (per-LED override)
-        """
+        cfg = {**DEFAULT_CONFIG, **config}
+
+        # Accept the prior application's per-LED key names during migration.
+        if "common_anode_led1" in config and "led1_common_anode" not in config:
+            cfg["led1_common_anode"] = bool(config["common_anode_led1"])
+        if "common_anode_led2" in config and "led2_common_anode" not in config:
+            cfg["led2_common_anode"] = bool(config["common_anode_led2"])
+        if "common_anode" in config:
+            cfg["led1_common_anode"] = bool(config["common_anode"])
+            cfg["led2_common_anode"] = bool(config["common_anode"])
+
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
 
-        pins = {k: config.get(k, DEFAULT_PINS[k]) for k in DEFAULT_PINS}
+        self.led1 = RGBLed(
+            r_pin=cfg["led1_r"],
+            g_pin=cfg["led1_g"],
+            b_pin=cfg["led1_b"],
+            common_anode=cfg["led1_common_anode"],
+            name="LED1",
+        )
+        self.led2 = RGBLed(
+            r_pin=cfg["led2_r"],
+            g_pin=cfg["led2_g"],
+            b_pin=cfg["led2_b"],
+            common_anode=cfg["led2_common_anode"],
+            name="LED2",
+        )
 
-        if "common_anode_led1" in config or "common_anode_led2" in config:
-            ca1 = config.get("common_anode_led1", DEFAULT_COMMON_ANODE["led1"])
-            ca2 = config.get("common_anode_led2", DEFAULT_COMMON_ANODE["led2"])
-        else:
-            shared = config.get("common_anode", False)
-            ca1 = ca2 = shared
+        def wiring(common_anode):
+            if common_anode:
+                return "common anode  (pin→3.3V, LOW=ON)"
+            return "common cathode (pin→GND, HIGH=ON)"
 
-        self.led1 = RGBLed(pins["led1_r"], pins["led1_g"], pins["led1_b"],
-                           common_anode=ca1, name="LED1")
-        self.led2 = RGBLed(pins["led2_r"], pins["led2_g"], pins["led2_b"],
-                           common_anode=ca2, name="LED2")
+        print(
+            f"  [LEDController] LED1  {wiring(cfg['led1_common_anode'])}  "
+            f"R={cfg['led1_r']} G={cfg['led1_g']} B={cfg['led1_b']}"
+        )
+        print(
+            f"  [LEDController] LED2  {wiring(cfg['led2_common_anode'])}  "
+            f"R={cfg['led2_r']} G={cfg['led2_g']} B={cfg['led2_b']}"
+        )
 
     def get_led(self, led_index: int) -> RGBLed:
         if led_index == 1:
@@ -161,7 +169,7 @@ class LedController:
         self.led2.off()
 
     def cleanup(self):
-        self.all_off()
-        self.led1.stop_pwm()
-        self.led2.stop_pwm()
+        self.led1.safe_release()
+        self.led2.safe_release()
         GPIO.cleanup()
+        print("  [LEDController] GPIO cleaned up.")

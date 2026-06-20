@@ -12,7 +12,7 @@ Mobile request shape (JSON from ConfigScreen):
         "iterations":  int,     # number of flashes per color
         "duration":    float,   # seconds, flash on-time
         "delay":       float,   # seconds, gap between flashes
-        "intensity":   float,   # 0..100 percent (PWM duty)
+        "intensity":   float,   # retained for API compatibility; HIGH/LOW driver ignores it
         "gpio":        { ...optional pin overrides... },
         "common_anode": bool | { "led1": bool, "led2": bool }
     }
@@ -20,7 +20,7 @@ Mobile request shape (JSON from ConfigScreen):
 Backend config shape (what Orchestrator wants):
     {
         led1_r, led1_g, led1_b, led2_r, led2_g, led2_b: int,
-        common_anode | common_anode_led1/led2: bool,
+        common_anode | led1_common_anode/led2_common_anode: bool,
         mode: "dual" | "left_to_right" | "right_to_left",
         schedule: {
             flashes: [ {hex, duration_ms, intensity_pct}, ... ],   # dual
@@ -56,17 +56,24 @@ def adapt(payload: dict) -> dict:
     intensity  = float(payload.get("intensity", 100.0))
 
     duration_ms = max(50, int(duration_s * 1000))
-    gap_ms      = max(50, int(delay_s    * 1000))
+    # Initial PLR analysis observes three seconds after each flash. Enforce a
+    # matching inter-flash gap so the next flash does not contaminate that window.
+    gap_ms      = max(3000, int(delay_s * 1000))
 
     # ── GPIO + wiring ────────────────────────────────────────────────────────
     gpio_in = payload.get("gpio") or {}
     pins = {k: int(gpio_in.get(k, DEFAULT_PINS[k])) for k in DEFAULT_PINS}
 
-    ca_in = payload.get("common_anode", False)
+    ca_in = payload.get("common_anode")
     if isinstance(ca_in, dict):
         wiring = {
-            "common_anode_led1": bool(ca_in.get("led1", DEFAULT_COMMON_ANODE["led1"])),
-            "common_anode_led2": bool(ca_in.get("led2", DEFAULT_COMMON_ANODE["led2"])),
+            "led1_common_anode": bool(ca_in.get("led1", DEFAULT_COMMON_ANODE["led1"])),
+            "led2_common_anode": bool(ca_in.get("led2", DEFAULT_COMMON_ANODE["led2"])),
+        }
+    elif ca_in is None:
+        wiring = {
+            "led1_common_anode": DEFAULT_COMMON_ANODE["led1"],
+            "led2_common_anode": DEFAULT_COMMON_ANODE["led2"],
         }
     else:
         wiring = {"common_anode": bool(ca_in)}
@@ -118,4 +125,6 @@ def adapt(payload: dict) -> dict:
         "schedule": schedule,
         "camera":   {"output_dir": "recordings"},
         "participant": payload.get("participant", {}),
+        "pre_roll_s": 1.0,
+        "post_roll_s": 3.0,
     }

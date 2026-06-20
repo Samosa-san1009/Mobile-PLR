@@ -57,7 +57,8 @@ def main():
         hex_queue_2=orchestrator.hex_queue_2,
         ts_queue_2=orchestrator.ts_queue_2,
         clips_root="clips",
-        padding_s=0.1,        # 100ms padding before and after each flash
+        pre_flash_s=1.0,
+        post_flash_s=3.0,
     )
 
     try:
@@ -71,13 +72,14 @@ def main():
     print("\n  ── Running model inference ─────────────────────────")
 
     caller = ModelCaller(
-        model_url="http://localhost:8000/analyze",   # adjust to your model's endpoint
         clips_root="clips",
         results_dir="results",
+        cropped_dir="cropped",
+        predictions_dir="predictions",
     )
 
     try:
-        results = caller.run(clip_paths)
+        results = caller.run(clip_paths, segmenter.clip_metadata)
     except Exception:
         print("\n  Error during model inference:")
         traceback.print_exc()

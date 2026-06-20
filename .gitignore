@@ -12,6 +12,7 @@ venv/
 backend/recordings/
 backend/clips/
 backend/results/
+sessions/
 
 # Node / React Native
 node_modules/

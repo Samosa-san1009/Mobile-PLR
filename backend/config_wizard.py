@@ -118,17 +118,22 @@ def _collect_gpio_pins() -> dict:
         print()
     return pins
 
-def _collect_led_type() -> bool:
-    _section("LED Wiring Type")
-    print("  Common cathode : common pin → GND   (most common)")
-    print("  Common anode   : common pin → 3.3V/5V")
+def _collect_led_type() -> dict:
+    _section("LED Wiring Type  (per LED)")
+    print("  Common cathode : common pin → GND    HIGH = ON")
+    print("  Common anode   : common pin → 3.3V   LOW  = ON")
     print()
-    choice = _prompt(
-        "LED type  [1 = common cathode,  2 = common anode]",
-        default="1",
-        validator=lambda v: None if v in ("1", "2") else "Enter 1 or 2.",
-    )
-    return choice == "2"
+    result = {}
+    for led_n, side in ((1, "Left "), (2, "Right")):
+        choice = _prompt(
+            f"  LED {led_n} ({side}) wiring  [1 = common cathode,  2 = common anode]",
+            default="1",
+            validator=lambda v: None if v in ("1", "2") else "Enter 1 or 2.",
+        )
+        result[f"led{led_n}_common_anode"] = (choice == "2")
+        label = "common anode  (→3.3V)" if choice == "2" else "common cathode (→GND)"
+        print(f"    → LED {led_n}: {label}\n")
+    return result
 
 def _collect_camera_config() -> dict:
     _section("Camera Settings")
@@ -240,16 +245,14 @@ def _collect_gap_between_rounds(unit: str = "rounds") -> int:
 def _print_summary(config: dict):
     _section("Session Summary")
 
-    led_type = "Common anode" if config["common_anode"] else "Common cathode"
-    mode     = config["mode"]
-
+    mode = config["mode"]
     print(f"  Mode          : {MODE_LABELS[mode]}")
-    print(f"  LED wiring    : {led_type}")
     print()
 
     for led_n, side in ((1, "Left"), (2, "Right")):
-        pins = (config[f"led{led_n}_r"], config[f"led{led_n}_g"], config[f"led{led_n}_b"])
-        print(f"  LED {led_n} ({side:<5}) : R={pins[0]}  G={pins[1]}  B={pins[2]}")
+        pins   = (config[f"led{led_n}_r"], config[f"led{led_n}_g"], config[f"led{led_n}_b"])
+        wiring = "anode (→3.3V)" if config[f"led{led_n}_common_anode"] else "cathode (→GND)"
+        print(f"  LED {led_n} ({side:<5}) : R={pins[0]}  G={pins[1]}  B={pins[2]}   {wiring}")
     print()
 
     sched = config["schedule"]
@@ -286,9 +289,9 @@ def run_wizard() -> dict:
     print("║        PLR Pupillometry — Session Configuration        ║")
     print("╚════════════════════════════════════════════════════════╝")
 
-    gpio_pins    = _collect_gpio_pins()
-    common_anode = _collect_led_type()
-    mode         = _collect_mode()
+    gpio_pins  = _collect_gpio_pins()
+    led_wiring = _collect_led_type()
+    mode       = _collect_mode()
 
     if mode == "dual":
         schedule = _collect_dual_schedule()
@@ -299,10 +302,10 @@ def run_wizard() -> dict:
 
     config = {
         **gpio_pins,
-        "common_anode": common_anode,
-        "mode":         mode,
-        "schedule":     schedule,
-        "camera":       camera_cfg,
+        **led_wiring,
+        "mode":     mode,
+        "schedule": schedule,
+        "camera":   camera_cfg,
     }
 
     _print_summary(config)

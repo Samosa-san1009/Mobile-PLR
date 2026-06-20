@@ -11,38 +11,42 @@ ConfigScreen (RN)  ──POST /session──►  server.py
                                          ▼
                                     Segmenter
                                          │
-                              HTTP server stops listening
+                                         ▼
+                                    EyeCropper
                                          │
                                          ▼
-                                   ModelCaller
+                              INT8 ONNX ModelCaller
                                          │
-                              results/session_summary.json
+                           sessions/<id>/results/session_summary.json
 ResultsScreen (RN) ──GET /results───────┘   (+ cached to Downloads/eyezer/)
 ```
 
 ## Pi side — running the server
 
 ```bash
-cd device/backend
-pip3 install -r requirements.txt
+cd ~/Documents/Mobile-PLR
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
 sudo apt install -y python3-picamera2 python3-libcamera ffmpeg
+cd backend
 python3 server.py             # listens on 0.0.0.0:5000
 ```
 
-The server is **single-session**: after the pipeline completes and results
-are written, the process exits to free CPU/RAM. Re-launch it (or run it
-under systemd with `Restart=always`) before the next session.
+The server permits one active session at a time and remains running during
+inference and after results are written.
 
 ## GPIO + wiring — set per device
 
 Pins and common-anode flags are placeholders in `led_controller.py`:
 
 ```python
-DEFAULT_PINS = {
+DEFAULT_CONFIG = {
+    "led1_common_anode": False,
     "led1_r": 17, "led1_g": 27, "led1_b": 22,    # ← edit
+    "led2_common_anode": True,
     "led2_r": 23, "led2_g": 24, "led2_b": 25,    # ← edit
 }
-DEFAULT_COMMON_ANODE = {"led1": False, "led2": False}   # ← edit per LED
 ```
 
 Either edit the file or pass overrides in the mobile payload:
@@ -87,9 +91,9 @@ Translation rules (`config_adapter.py`):
 | `eye = Right` | `mode = right_to_left`, `active_led = 2` (LED1 skipped) |
 | `eye = Both`  | `mode = dual` (both LEDs fire together) |
 | `color = All` | cycles R, G, B, Y, W across rounds |
-| `intensity`   | PWM duty cycle in `RGBLed.flash()` |
+| `intensity`   | Retained for API compatibility; direct HIGH/LOW controller ignores it |
 | `duration` s  | flash on-time in ms |
-| `delay` s     | gap between flashes / rounds |
+| `delay` s     | gap between flashes / rounds; minimum 3 seconds for analysis |
 
 ## Mobile — set the Pi address
 
@@ -103,8 +107,23 @@ If mDNS isn't available on your LAN, use the Pi's IP directly.
 
 ## Pi 4 thermal budget (single IR cam, no cooler)
 
-- PWM frequency held at 200 Hz (low CPU, no visible flicker).
+- LEDs use direct GPIO HIGH/LOW output with safe OFF initialization.
 - Camera resolution capped at 640×480 @ 24 fps with H.264 HW encoder.
 - Camera and GPIO are released as soon as flashes finish.
-- HTTP server stops accepting work before model inference starts so the
-  Pi has all cores free for the pupillometry model.
+- ONNX Runtime uses four inference threads by default.
+
+## Model crop and result contract
+
+The trained model does not crop an eye; it expects the complete frame to
+already be an eye region. The backend therefore crops each segmented clip:
+
+- LED 1 uses `PLR_LEFT_EYE_ROI` and the left-eye ONNX model.
+- LED 2 uses `PLR_RIGHT_EYE_ROI` and the right-eye ONNX model.
+
+ROIs use normalized `x,y,width,height` values. Defaults split the camera frame
+into left and right halves. Inspect each session's `cropped/` videos and tune
+the ROIs for the physical camera orientation.
+
+Results use pixels and include aggregate metrics plus the full per-frame
+diameter series. See the root README for the initial formulas and mock-mode
+environment variables.

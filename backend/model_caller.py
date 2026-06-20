@@ -1,158 +1,246 @@
-"""
-model_caller.py
----------------
-Iterates clips/led1/ and clips/led2/ and submits each clip
-to the RESTful or PuReST pupillometry model running on the Pi.
+"""Run the bundled eye models and produce mobile-ready PLR results.
 
-Set MOCK_MODE = True to skip the real model and print fake results.
-This lets you test the full pipeline on a Pi without the model running.
+The ONNX inference implementation remains in ``ml_model/inference``. This
+adapter supplies the missing application integration: eye cropping, model
+selection, per-frame CSV output, initial PLR metrics, partial failure handling,
+and a stable JSON contract for the mobile app.
 """
 
-import os
+from __future__ import annotations
+
+import importlib.util
 import json
-import time
+import logging
+import os
 import random
+import time
+from pathlib import Path
 
-MOCK_MODE = True   # ← set False when your real model endpoint is ready
+from eye_cropper import EyeCropper
+from plr_metrics import calculate_plr_metrics
 
-try:
-    import requests
-    _REQUESTS_AVAILABLE = True
-except ImportError:
-    _REQUESTS_AVAILABLE = False
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class ModelCaller:
-
     def __init__(
         self,
-        model_url:   str = "http://localhost:8000/analyze",
-        clips_root:  str = "clips",
+        clips_root: str = "clips",
         results_dir: str = "results",
-        timeout_s:   int = 60,
-        mock:        bool = MOCK_MODE,
+        cropped_dir: str = "cropped",
+        predictions_dir: str = "predictions",
+        model_dir: str | None = None,
+        session_id: str | None = None,
+        mock: bool | None = None,
+        progress_callback=None,
+        logger: logging.Logger | None = None,
     ):
-        self.model_url   = model_url
-        self.clips_root  = clips_root
-        self.results_dir = results_dir
-        self.timeout_s   = timeout_s
-        self.mock        = mock
-        os.makedirs(results_dir, exist_ok=True)
+        self.clips_root = Path(clips_root)
+        self.results_dir = Path(results_dir)
+        self.cropped_dir = Path(cropped_dir)
+        self.predictions_dir = Path(predictions_dir)
+        self.session_id = session_id
+        self.mock = _env_flag("PLR_MOCK_MODE", False) if mock is None else mock
+        self.progress_callback = progress_callback
+        self.logger = logger or logging.getLogger(__name__)
+
+        repo_root = Path(__file__).resolve().parent.parent
+        self.inference_script = repo_root / "ml_model" / "inference" / "inference_onnx.py"
+        self.model_dir = Path(model_dir) if model_dir else (
+            repo_root / "ml_model" / "inference" / "model_weights"
+        )
+
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.cropped_dir.mkdir(parents=True, exist_ok=True)
+        self.predictions_dir.mkdir(parents=True, exist_ok=True)
+
+        self._inference_module = None
+        self._sessions = {}
+        self.cropper = EyeCropper(str(self.cropped_dir))
 
         if self.mock:
-            print("  [Model] ⚠  MOCK MODE — no real model will be called.")
-            print("  [Model]    Set mock=False (or MOCK_MODE=False) to use the real endpoint.\n")
+            self.logger.warning("PLR_MOCK_MODE is enabled; predictions are simulated")
 
-    # ── public ────────────────────────────────────────────────────────────────
-
-    def run(self, clip_paths: dict = None) -> dict:
-        """
-        clip_paths: optional {led_index: [path, ...]} from Segmenter.run()
-        If None the clips/ folder is scanned directly.
-        Returns {clip_path: result_dict}
-        """
+    def run(self, clip_paths: dict | None = None, clip_metadata: dict | None = None) -> dict:
         if clip_paths is None:
             clip_paths = self._scan_clips_folder()
+        clip_metadata = clip_metadata or {}
 
-        all_results = {}
+        jobs = [
+            (led_index, clip_path)
+            for led_index in sorted(clip_paths)
+            for clip_path in clip_paths[led_index]
+        ]
+        results = {}
+        failures = 0
 
-        for led_index in sorted(clip_paths.keys()):
-            paths = clip_paths[led_index]
-            print(f"\n  [Model] LED {led_index} — {len(paths)} clip(s)")
+        for completed, (led_index, clip_path) in enumerate(jobs, start=1):
+            metadata = clip_metadata.get(clip_path, {})
+            try:
+                result = self._analyze_clip(led_index, clip_path, metadata)
+            except Exception as exc:
+                failures += 1
+                self.logger.exception("Inference failed for %s", clip_path)
+                result = {
+                    "status": "error",
+                    "error": str(exc),
+                    "unit": "px",
+                    "_meta": self._build_meta(led_index, clip_path, metadata),
+                }
+            results[clip_path] = result
+            self._save_clip_result(led_index, clip_path, result)
+            if self.progress_callback:
+                self.progress_callback(completed, len(jobs), clip_path, result["status"])
 
-            for clip_path in paths:
-                result = self._analyze_clip(led_index, clip_path)
-                all_results[clip_path] = result
-
-        self._save_summary(all_results)
-        return all_results
-
-    # ── internal ──────────────────────────────────────────────────────────────
-
-    def _analyze_clip(self, led_index: int, clip_path: str) -> dict:
-        filename  = os.path.basename(clip_path)
-        safe_hex  = filename.replace(".mp4", "").split("_")[0]
-        hex_color = "#" + safe_hex
-
-        print(f"    → {filename}  (LED {led_index}, color {hex_color})")
-
-        if self.mock:
-            result = self._mock_response(led_index, hex_color, clip_path)
+        succeeded = len(jobs) - failures
+        if not jobs or succeeded == 0:
+            status = "error"
+        elif failures:
+            status = "partial"
         else:
-            result = self._real_request(led_index, hex_color, clip_path)
+            status = "ok"
 
-        result["_meta"] = {
-            "led_index":  led_index,
-            "hex_color":  hex_color,
-            "clip_path":  clip_path,
-            "timestamp":  time.time(),
-            "mock":       self.mock,
+        summary = {
+            "schema_version": 2,
+            "status": status,
+            "unit": "px",
+            "session_id": self.session_id,
+            "mock": self.mock,
+            "formula_note": (
+                "Initial formulas: baseline is the median smoothed pre-flash "
+                "diameter; minimum is the lowest smoothed post-flash diameter; "
+                "amplitude is baseline minus minimum; latency is flash onset "
+                "to the minimum. These definitions require clinical validation."
+            ),
+            "result_count": len(jobs),
+            "failure_count": failures,
+            "results": results,
         }
+        self._save_summary(summary)
+        return summary
 
-        self._save_clip_result(filename, result)
-        return result
+    def _analyze_clip(self, led_index: int, clip_path: str, metadata: dict) -> dict:
+        meta = self._build_meta(led_index, clip_path, metadata)
+        if self.mock:
+            metrics = self._mock_metrics(metadata)
+            return {"status": "ok", **metrics, "_meta": {**meta, "mock": True}}
 
-    def _mock_response(self, led_index: int, hex_color: str, clip_path: str) -> dict:
-        """Simulate a plausible PLR model response for testing."""
-        baseline   = round(random.uniform(3.5, 5.5), 3)
-        constrict  = round(baseline - random.uniform(0.5, 1.5), 3)
-        latency    = round(random.uniform(150, 350), 1)
-        amplitude  = round(baseline - constrict, 3)
-        print(f"      [MOCK] baseline={baseline}mm  constriction={constrict}mm  "
-              f"latency={latency}ms  amplitude={amplitude}mm")
+        cropped_path, crop_meta = self.cropper.crop(clip_path, led_index)
+        inference = self._load_inference_module()
+        session = self._model_session(led_index)
+        frame_predictions = inference.run_inference_on_clip(
+            Path(cropped_path),
+            session,
+            batch_size=int(os.environ.get("PLR_INFERENCE_BATCH_SIZE", "4")),
+        )
+
+        prediction_path = self.predictions_dir / f"led{led_index}_{Path(clip_path).stem}.csv"
+        frame_predictions.to_csv(prediction_path, index=False)
+        fps = self._video_fps(cropped_path)
+        metrics = calculate_plr_metrics(
+            frame_predictions["frame"].tolist(),
+            frame_predictions["pred_diameter_px"].tolist(),
+            fps=fps,
+            flash_onset_s=float(metadata.get("flash_onset_s", 1.0)),
+            smoothing_window=int(os.environ.get("PLR_SMOOTHING_WINDOW", "5")),
+        )
         return {
-            "status":              "ok (mock)",
-            "baseline_diameter_mm":    baseline,
-            "min_diameter_mm":         constrict,
-            "constriction_amplitude_mm": amplitude,
-            "latency_ms":              latency,
+            "status": "ok",
+            **metrics,
+            "_meta": {
+                **meta,
+                **crop_meta,
+                "prediction_csv": str(prediction_path),
+                "model": "left_eye_int8.onnx" if led_index == 1 else "right_eye_int8.onnx",
+                "mock": False,
+            },
         }
 
-    def _real_request(self, led_index: int, hex_color: str, clip_path: str) -> dict:
-        if not _REQUESTS_AVAILABLE:
-            return {"error": "requests library not installed"}
+    def _load_inference_module(self):
+        if self._inference_module is not None:
+            return self._inference_module
+        if not self.inference_script.is_file():
+            raise FileNotFoundError(f"Inference script not found: {self.inference_script}")
+        spec = importlib.util.spec_from_file_location("plr_inference_onnx", self.inference_script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self._inference_module = module
+        return module
 
-        payload = {
-            "video_path": os.path.abspath(clip_path),
-            "led_index":  led_index,
-            "hex_color":  hex_color,
-        }
+    def _model_session(self, led_index: int):
+        if led_index in self._sessions:
+            return self._sessions[led_index]
+        inference = self._load_inference_module()
+        filename = "left_eye_int8.onnx" if led_index == 1 else "right_eye_int8.onnx"
+        model_path = self.model_dir / filename
+        if not model_path.is_file():
+            raise FileNotFoundError(f"ONNX model not found: {model_path}")
+        session = inference.create_session(
+            str(model_path),
+            num_threads=int(os.environ.get("PLR_INFERENCE_THREADS", "4")),
+        )
+        self._sessions[led_index] = session
+        return session
+
+    @staticmethod
+    def _video_fps(video_path: str) -> float:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
         try:
-            resp = requests.post(self.model_url, json=payload, timeout=self.timeout_s)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.ConnectionError:
-            print(f"      ✗ Cannot connect to model at {self.model_url}")
-            return {"error": "connection_failed"}
-        except requests.exceptions.Timeout:
-            print(f"      ✗ Model timed out after {self.timeout_s}s")
-            return {"error": "timeout"}
-        except requests.exceptions.HTTPError as e:
-            print(f"      ✗ HTTP error: {e}")
-            return {"error": str(e)}
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+        finally:
+            cap.release()
+        return fps if fps > 0 else 24.0
 
-    def _save_clip_result(self, filename: str, result: dict):
-        base = filename.replace(".mp4", "")
-        out  = os.path.join(self.results_dir, f"{base}.json")
-        with open(out, "w") as f:
-            json.dump(result, f, indent=2)
+    @staticmethod
+    def _mock_metrics(metadata: dict) -> dict:
+        fps = 24.0
+        flash_onset_s = float(metadata.get("flash_onset_s", 1.0))
+        duration_s = max(4.0, float(metadata.get("clip_end_s", 4.0)) - float(metadata.get("clip_start_s", 0.0)))
+        frames = list(range(int(duration_s * fps)))
+        baseline = random.uniform(35.0, 55.0)
+        diameters = []
+        for frame in frames:
+            time_s = frame / fps
+            if time_s < flash_onset_s:
+                value = baseline + random.uniform(-0.4, 0.4)
+            else:
+                elapsed = time_s - flash_onset_s
+                constriction = min(10.0, elapsed * 8.0) if elapsed < 1.25 else max(0.0, 10.0 - (elapsed - 1.25) * 3.0)
+                value = baseline - constriction + random.uniform(-0.25, 0.25)
+            diameters.append(value)
+        return calculate_plr_metrics(frames, diameters, fps, flash_onset_s)
 
-    def _save_summary(self, all_results: dict):
-        path = os.path.join(self.results_dir, "session_summary.json")
-        with open(path, "w") as f:
-            json.dump({str(k): v for k, v in all_results.items()}, f, indent=2)
-        print(f"\n  [Model] Summary → {path}")
+    @staticmethod
+    def _build_meta(led_index: int, clip_path: str, metadata: dict) -> dict:
+        filename = Path(clip_path).name
+        return {
+            **metadata,
+            "led_index": led_index,
+            "eye": "Left" if led_index == 1 else "Right",
+            "hex_color": metadata.get("hex_color", "#" + filename.split("_")[0].replace(".mp4", "")),
+            "clip_path": clip_path,
+            "timestamp": time.time(),
+        }
+
+    def _save_clip_result(self, led_index: int, clip_path: str, result: dict):
+        output = self.results_dir / f"led{led_index}_{Path(clip_path).stem}.json"
+        output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+    def _save_summary(self, summary: dict):
+        output = self.results_dir / "session_summary.json"
+        output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        self.logger.info("Session summary written to %s", output)
 
     def _scan_clips_folder(self) -> dict:
         result = {}
         for led_index in (1, 2):
-            folder = os.path.join(self.clips_root, f"led{led_index}")
-            if not os.path.isdir(folder):
-                result[led_index] = []
-                continue
-            result[led_index] = sorted(
-                os.path.join(folder, f)
-                for f in os.listdir(folder)
-                if f.endswith(".mp4")
-            )
+            folder = self.clips_root / f"led{led_index}"
+            result[led_index] = sorted(str(path) for path in folder.glob("*.mp4")) if folder.is_dir() else []
         return result

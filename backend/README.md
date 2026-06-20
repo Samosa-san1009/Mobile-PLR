@@ -9,11 +9,13 @@
 plr_system/
 ├── main.py               ← Entry point. Run this.
 ├── config_wizard.py      ← Interactive terminal config (mode, pins, schedule)
-├── led_controller.py     ← GPIO HIGH/LOW control for both RGB LEDs
+├── led_controller.py     ← Per-LED polarity-safe GPIO HIGH/LOW control
 ├── orchestrator.py       ← Flash sequencer + fills 4 queues
 ├── camera_controller.py  ← IR camera recording (continuous, background thread)
 ├── segmenter.py          ← Cuts full video into per-flash clips via ffmpeg
-├── model_caller.py       ← Sends clips to model (MOCK MODE on by default)
+├── eye_cropper.py        ← Crops full camera clips to one-eye model inputs
+├── model_caller.py       ← Runs bundled INT8 ONNX inference
+├── plr_metrics.py        ← Initial pixel-based PLR formulas
 ├── requirements.txt      ← Python dependencies
 │
 ├── recordings/           ← Full session videos saved here (auto-created)
@@ -45,10 +47,8 @@ ffmpeg -version
 pip3 install -r requirements.txt
 ```
 
-`requirements.txt` installs:
-- `RPi.GPIO`     — GPIO control
-- `opencv-python` — camera capture
-- `requests`     — model HTTP calls (used only in live mode)
+`requirements.txt` installs GPIO/Flask plus the direct ONNX inference stack:
+`onnxruntime`, headless OpenCV, NumPy, Pandas, and tqdm.
 
 > **Note:** `opencv-python` can be slow to install on Pi. If it times out,
 > use the pre-built package instead:
@@ -191,31 +191,20 @@ python3 main.py
 
 ## Testing without the model (Mock Mode)
 
-`model_caller.py` has `MOCK_MODE = True` at the top by default.
+Real bundled ONNX inference is the default. For an orchestration-only test:
 
-In mock mode the system:
-- Runs the full pipeline (config → GPIO → camera → segment)
-- **Skips** the real HTTP call to the model
-- Prints simulated pupil measurements (baseline, constriction, latency)
-- Saves fake results as real JSON in `results/`
-
-This lets you verify GPIO, camera, segmentation, and folder structure
-all work correctly on the Pi before the model is ready.
-
-**To switch to real model when ready:**
-
-Open `model_caller.py` and change line 14:
-```python
-MOCK_MODE = False   # was True
+```bash
+export PLR_MOCK_MODE=1
 ```
 
-Then set the correct URL in `main.py` line 47:
-```python
-caller = ModelCaller(
-    model_url="http://localhost:8000/analyze",   # ← your model endpoint
-    ...
-)
+To disable mock mode and restore real inference:
+
+```bash
+export PLR_MOCK_MODE=0
 ```
+
+Mock mode produces simulated pixel-diameter curves. It does not validate the
+model, crop alignment, or measurement accuracy.
 
 ---
 
@@ -309,7 +298,8 @@ seg = Segmenter(
     hex_queue_1=hq1, ts_queue_1=tq1,
     hex_queue_2=hq2, ts_queue_2=tq2,
     clips_root="clips",
-    padding_s=0.1,
+    pre_flash_s=1.0,
+    post_flash_s=3.0,
 )
 
 paths = seg.run()
@@ -359,21 +349,20 @@ plr_system/
 
 ---
 
-## Switching to live model
+## Model mode
 
-When RESTful or PuReST is running on the Pi:
+The bundled INT8 ONNX models run directly in the backend. Real inference is
+the default:
 
-1. Set `MOCK_MODE = False` in `model_caller.py`
-2. Set the correct URL in `main.py`:
-   ```python
-   caller = ModelCaller(model_url="http://localhost:PORT/analyze", ...)
-   ```
-3. Confirm your model accepts this JSON payload:
-   ```json
-   {
-     "video_path": "/absolute/path/to/clips/led1/FF0000.mp4",
-     "led_index": 1,
-     "hex_color": "#FF0000"
-   }
-   ```
-   If it uses a different format, edit `_real_request()` in `model_caller.py`.
+```bash
+export PLR_MOCK_MODE=0
+```
+
+For a temporary orchestration-only test:
+
+```bash
+export PLR_MOCK_MODE=1
+```
+
+See the root `README.md` for crop ROI configuration and `TESTING.md` for the
+video integration harness.

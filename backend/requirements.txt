@@ -3,14 +3,18 @@
 #  Raspberry Pi 4 (Raspberry Pi OS Bookworm or newer)
 # ─────────────────────────────────────────────────────────────
 
-# GPIO + PWM for the two RGB LEDs
+# GPIO HIGH/LOW control for the two RGB LEDs
 RPi.GPIO >= 0.7.1
 
 # HTTP server (mobile app ↔ Pi) — kept tiny to suit Pi 4 without cooler
 Flask >= 2.3.0
 
-# HTTP client used by ModelCaller in live mode
-requests >= 2.28.0
+# Direct INT8 ONNX pupil-diameter inference
+onnxruntime >= 1.16.0
+opencv-python-headless >= 4.8.0
+numpy >= 1.24.0
+pandas >= 2.0.0
+tqdm >= 4.65.0
 
 # ─────────────────────────────────────────────────────────────
 #  IR Pi Camera Module (CSI ribbon) — picamera2

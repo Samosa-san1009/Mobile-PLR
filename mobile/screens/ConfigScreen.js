@@ -2,18 +2,17 @@ import React, {useState} from 'react';
 import {View, StyleSheet, Text, Button, TouchableOpacity} from 'react-native';
 import Slider from '@react-native-community/slider';
 import ColorPalette from 'react-native-color-palette';
-import {exp} from 'react-native/Libraries/Animated/Easing';
 import {startSession} from '../api';
 
 export function ConfigScreen({navigation, route}) {
   const {data} = route.params;
 
   const [eye, setEye] = useState('Left');
-  const [color, setColor] = useState('#F7F7F7');
-  const [iterations, setIterations] = useState(0.0);
-  const [duration, setDuration] = useState(0.0);
-  const [delay, setDelay] = useState(0.0);
-  const [intensity, setIntensity] = useState(0.0);
+  const [color, setColor] = useState('White');
+  const [iterations, setIterations] = useState(1);
+  const [duration, setDuration] = useState(1);
+  const [delay, setDelay] = useState(3);
+  const [intensity, setIntensity] = useState(50);
 
   const colorID = {
     '#EB5353': 'Red',
@@ -129,7 +128,7 @@ export function ConfigScreen({navigation, route}) {
         <Text style={styles.details}>Iterations: {iterations}</Text>
         <Slider
           step={1}
-          minimumValue={0}
+          minimumValue={1}
           maximumValue={10}
           value={iterations}
           onValueChange={slideValue => setIterations(slideValue)}
@@ -141,7 +140,7 @@ export function ConfigScreen({navigation, route}) {
         <Text style={styles.details}>Duration: {duration}s</Text>
         <Slider
           step={1}
-          minimumValue={0}
+          minimumValue={1}
           maximumValue={10}
           value={duration}
           onValueChange={slideValue => setDuration(slideValue)}
@@ -153,7 +152,7 @@ export function ConfigScreen({navigation, route}) {
         <Text style={styles.details}>Delay: {delay}s</Text>
         <Slider
           step={1}
-          minimumValue={0}
+          minimumValue={3}
           maximumValue={10}
           value={delay}
           onValueChange={slideValue => setDelay(slideValue)}

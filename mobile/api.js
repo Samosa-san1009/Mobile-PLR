@@ -18,7 +18,6 @@ export const STAGE = {
   STARTING:           'starting',
   RECORDING:          'recording',
   SEGMENTING:         'segmenting',
-  SHUTTING_DOWN_HTTP: 'shutting_down_http',
   INFERENCE:          'inference',
   DONE:               'done',
   ERROR:              'error',

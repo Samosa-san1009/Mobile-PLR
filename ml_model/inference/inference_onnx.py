@@ -54,6 +54,8 @@ Dependencies (Pi 4)
   (torch / torchvision NOT required on the Pi)
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 import time
@@ -67,11 +69,7 @@ from tqdm import tqdm
 try:
     import onnxruntime as ort
 except ImportError:
-    sys.exit(
-        "[ERROR] onnxruntime not installed.\n"
-        "Run: pip install onnxruntime\n"
-        "Do NOT install onnxruntime-gpu — it does not exist for ARM."
-    )
+    ort = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -105,6 +103,11 @@ def create_session(model_path: str, num_threads: int = 4) -> ort.InferenceSessio
     CPUExecutionProvider  — explicit list prevents ORT from probing for
                             CUDA/TensorRT/CoreML, which wastes startup time.
     """
+    if ort is None:
+        raise RuntimeError(
+            "onnxruntime is not installed. Run: pip install onnxruntime "
+            "(do not install onnxruntime-gpu on Raspberry Pi)."
+        )
     opts = ort.SessionOptions()
     opts.intra_op_num_threads        = num_threads
     opts.inter_op_num_threads        = 1
@@ -324,6 +327,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if ort is None:
+        sys.exit(
+            "[ERROR] onnxruntime not installed.\n"
+            "Run: pip install onnxruntime\n"
+            "Do NOT install onnxruntime-gpu — it does not exist for ARM."
+        )
 
     # ── Resolve model paths ───────────────────────────────────────────────────
     weights_dir = Path(args.weights)

@@ -2,7 +2,7 @@
 
 A pupil light-response (PLR) measurement prototype.
 
-- **Backend** runs on a Raspberry Pi 4. It drives two RGB LEDs (PWM),
+- **Backend** runs on a Raspberry Pi 4. It drives two RGB LEDs (GPIO HIGH/LOW),
   records the eye on an IR Pi Camera Module, segments per-flash clips,
   and runs them through a pupillometry model.
 - **Mobile app** is the operator interface. It collects participant
@@ -78,15 +78,20 @@ ls /dev/video*       # should list at least one device
 libcamera-hello -t 1000   # quick camera sanity check (window pops up briefly)
 ```
 
-Clone or copy the `device/` folder onto the Pi (e.g. to `~/device`).
+Clone or copy the repository to `~/Documents/Mobile-PLR`, then create a
+64-bit Python virtual environment:
 
 ```bash
-cd ~/device/backend
-pip3 install -r requirements.txt
+cd ~/Documents/Mobile-PLR
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r backend/requirements.txt
 ```
 
-`requirements.txt` installs `RPi.GPIO`, `Flask`, and `requests`.
-`picamera2` is installed via APT above, not pip.
+`--system-site-packages` lets the virtual environment use the APT-installed
+`picamera2` and `libcamera` modules. The requirements install Flask, GPIO,
+OpenCV, NumPy/Pandas, and ONNX Runtime for direct INT8 model inference.
 
 ---
 
@@ -96,14 +101,11 @@ Open [`backend/led_controller.py`](backend/led_controller.py) and edit the
 two placeholder blocks near the top to match your wiring:
 
 ```python
-DEFAULT_PINS = {
+DEFAULT_CONFIG = {
+    "led1_common_anode": False,  # common cathode → GND, HIGH = ON
     "led1_r": 17, "led1_g": 27, "led1_b": 22,    # ← LED 1 (left eye)
+    "led2_common_anode": True,   # common anode → 3.3V, LOW = ON
     "led2_r": 23, "led2_g": 24, "led2_b": 25,    # ← LED 2 (right eye)
-}
-
-DEFAULT_COMMON_ANODE = {
-    "led1": False,   # ← True if LED 1's common pin goes to 3.3V
-    "led2": False,   # ← True if LED 2's common pin goes to 3.3V
 }
 ```
 
@@ -116,7 +118,7 @@ cd ~/device/backend
 python3 - << 'EOF'
 from led_controller import LedController
 import time
-leds = LedController({})              # uses DEFAULT_PINS + DEFAULT_COMMON_ANODE
+leds = LedController({})              # uses DEFAULT_CONFIG
 leds.led1.flash("#FF0000", 400, 60)   # red, 400 ms, 60 % intensity
 time.sleep(0.3)
 leds.led2.flash("#0000FF", 400, 60)   # blue, 400 ms, 60 % intensity
@@ -125,24 +127,29 @@ EOF
 ```
 
 If the colors look inverted (LED is *on* when it should be *off*), flip
-that LED's `common_anode` flag.
+that LED's `led1_common_anode` or `led2_common_anode` flag.
+
+The timing-safe controller uses direct GPIO HIGH/LOW output rather than PWM.
+The mobile `intensity` value remains in the API for compatibility but is not
+applied by this controller.
 
 ---
 
 ## 4. Start the Pi backend
 
 ```bash
-cd ~/device/backend
+cd ~/Documents/Mobile-PLR
+source .venv/bin/activate
+cd backend
 python3 server.py
 #  * Serving Flask app …
 #  * Running on http://0.0.0.0:5000
 ```
 
-The server is **single-session by design**: once the flash sequence is
-done and clips are cut, it stops the HTTP listener and devotes the Pi's
-CPU entirely to running the pupillometry model. After results land in
-`results/session_summary.json` the process exits. Re-launch it before
-the next session — or run it under systemd with `Restart=always`:
+The server accepts one active session at a time, but remains running during
+and after inference. Every experiment is stored under a unique
+`sessions/<timestamp>_<participant>/` directory with its recording, clips,
+cropped eye videos, prediction CSVs, result JSON, metadata, and `session.log`.
 
 ```ini
 # /etc/systemd/system/plr.service
@@ -152,8 +159,8 @@ After=network-online.target
 
 [Service]
 User=pi
-WorkingDirectory=/home/pi/device/backend
-ExecStart=/usr/bin/python3 /home/pi/device/backend/server.py
+WorkingDirectory=/home/pi/Documents/Mobile-PLR/backend
+ExecStart=/home/pi/Documents/Mobile-PLR/.venv/bin/python /home/pi/Documents/Mobile-PLR/backend/server.py
 Restart=always
 RestartSec=2
 
@@ -225,12 +232,12 @@ npx react-native run-ios
    delay, intensity. Tap **Start Experiment**.
    - The phone POSTs the config to `http://<pi>:5000/session`.
    - The Pi runs the flash sequence while recording IR video.
-4. **Experiment** — looping background while the app polls
-   `/status`. When the Pi finishes recording and segmenting clips,
-   it closes the HTTP listener and runs the model. The app gracefully
-   handles that gap and waits for results.
+4. **Experiment** — looping background while the app polls `/status`.
+   The server remains responsive while it crops eye regions and runs ONNX
+   inference.
 5. **Results** — the Pi's `session_summary.json` is fetched, rendered
-   as per-flash cards + a baseline/min line chart, and **cached locally
+   as per-flash cards, pixel-diameter response curves, and a baseline/min
+   comparison chart. It is also **cached locally
    to `Downloads/eyezer/`** on the phone so the Dashboard can show it
    later offline.
 6. **Dashboard** (PIN 2580) — browse past sessions stored on the phone.
@@ -245,23 +252,55 @@ npx react-native run-ios
 | Camera opens but frames are black         | IR illuminator off, or wrong sensor. `libcamera-hello -t 2000` should show a preview.|
 | LED stays on when it should be off        | Flip that LED's `common_anode` flag in `led_controller.py`.                          |
 | App says "Network request failed"         | Wrong `PI_BASE_URL`, phone on a different Wi-Fi, or firewall blocking port 5000.     |
-| `/status` returns 404 mid-session         | Expected — the Pi closed HTTP to free CPU for model. The app handles this and waits. |
+| Cropped video misses the eye              | Adjust `PLR_LEFT_EYE_ROI` / `PLR_RIGHT_EYE_ROI`; inspect the session's `cropped/` videos. |
+| Inference fails                           | Inspect the session's `session.log` and per-clip error in `session_summary.json`. |
 | Pi gets hot fast                          | Lower `fps` / `bitrate` in `camera_controller.py`, or shorten the session.           |
 | `ModuleNotFoundError: picamera2`          | `sudo apt install -y python3-picamera2 python3-libcamera` (not pip).                 |
 | ffmpeg clips are 0 bytes                  | Flash timestamps fell outside the recording window — increase pre/post-roll.         |
 
 ---
 
-## 8. Running without the real model (mock mode)
+## 8. Eye cropping, inference, and mock mode
 
-`backend/model_caller.py` has `MOCK_MODE = True` by default — the
-pipeline runs end-to-end, but the model HTTP call is faked with
-plausible numbers. This is the right mode to verify GPIO + camera +
-clip segmentation on the Pi before plugging in the real model.
+The model training code performs no crop: every training frame is already an
+eye region. The application therefore creates an eye-only video before calling
+the bundled INT8 ONNX inference script.
 
-When the model is ready, set `MOCK_MODE = False` and point
-`model_url` in `server.py`'s `_run_pipeline` call (or pass `"model_url"`
-in the mobile payload) at the model's endpoint.
+Default normalized camera ROIs:
+
+```bash
+export PLR_LEFT_EYE_ROI="0,0,0.5,1"
+export PLR_RIGHT_EYE_ROI="0.5,0,0.5,1"
+```
+
+The format is `x,y,width,height`, each in the range 0–1. These defaults split
+the image in half and must be verified against the physical camera orientation.
+The exact ROI is recorded in each result.
+
+Real ONNX inference is the default. To explicitly disable mock mode:
+
+```bash
+export PLR_MOCK_MODE=0
+```
+
+To temporarily enable simulated predictions for an orchestration test:
+
+```bash
+export PLR_MOCK_MODE=1
+```
+
+Results remain in pixels. No pixel-to-mm conversion is applied.
+
+The initial analysis windows are one second before flash onset and three
+seconds after it. The backend enforces at least a three-second inter-flash gap
+to avoid the next flash contaminating the response window. Initial formulas:
+
+- baseline: median of the smoothed pre-flash predictions
+- minimum: minimum smoothed prediction after flash onset
+- amplitude: baseline minus minimum
+- latency: flash onset to the minimum
+
+These formulas are an initial implementation and require clinical validation.
 
 ---
 
@@ -270,13 +309,18 @@ in the mobile payload) at the model's endpoint.
 | Path                                    | Purpose                                              |
 |-----------------------------------------|------------------------------------------------------|
 | `backend/server.py`                     | HTTP entry — talk to this from the app.              |
-| `backend/led_controller.py`             | **Edit pins + CA/CC here.** PWM driver.              |
+| `backend/led_controller.py`             | **Edit pins + CA/CC here.** Polarity-safe GPIO driver. |
 | `backend/camera_controller.py`          | picamera2 IR camera wrapper.                         |
 | `backend/orchestrator.py`               | Flash sequencer.                                     |
 | `backend/segmenter.py`                  | Cuts per-flash clips via ffmpeg.                     |
-| `backend/model_caller.py`               | Sends clips to model. Has `MOCK_MODE` flag.          |
+| `backend/eye_cropper.py`                | Creates configured eye-region videos for inference.  |
+| `backend/model_caller.py`               | Runs bundled INT8 ONNX models and builds results.     |
+| `backend/plr_metrics.py`                | Initial aggregate metrics + per-frame response data.  |
 | `backend/config_adapter.py`             | Mobile payload → backend config translation.         |
 | `mobile/api.js`                         | **Edit `PI_BASE_URL` here.**                         |
 | `mobile/screens/ConfigScreen.js`        | Posts session to Pi.                                 |
 | `mobile/screens/ExperimentScreen.js`    | Polls `/status` + `/results`.                        |
 | `mobile/screens/ResultsScreen.js`       | Renders per-flash results, caches to phone storage.  |
+
+See [`TESTING.md`](TESTING.md) for metric tests and the video integration
+harness that can be used once a validation video is available.

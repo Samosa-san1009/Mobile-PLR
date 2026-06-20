@@ -52,7 +52,8 @@ class Orchestrator:
         print(f"\n  [Orchestrator] Mode: {self.mode.replace('_', ' ').upper()}")
         print("  [Orchestrator] Starting camera...")
         recording_path = self.camera.start()
-        time.sleep(0.5)   # pre-roll
+        # The initial PLR formulas use one second of pre-flash baseline.
+        time.sleep(float(self.config.get("pre_roll_s", 1.0)))
 
         print("  [Orchestrator] Beginning flash sequence...\n")
 
@@ -63,7 +64,8 @@ class Orchestrator:
         elif self.mode == "right_to_left":
             self._run_sequential(first_led=2, second_led=1)
 
-        time.sleep(0.5)   # post-roll
+        # Keep recording long enough to observe constriction after the final flash.
+        time.sleep(float(self.config.get("post_roll_s", 3.0)))
 
         print("\n  [Orchestrator] Flash sequence complete. Stopping camera...")
         self.camera.stop()
