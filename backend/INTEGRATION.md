@@ -140,14 +140,29 @@ If mDNS isn't available on your LAN, use the Pi's IP directly.
 ## Model crop and result contract
 
 The trained model does not crop an eye; it expects the complete frame to
-already be an eye region. The backend therefore crops each segmented clip:
+already be an eye region. The backend therefore crops each segmented clip
+before ONNX inference.
+
+Default mode is `PLR_EYE_CROP_MODE=detect`. The backend runs OpenCV Haar eye
+detection on every frame, but constrains detection to the relevant half first:
+LED 1 / the left-eye ONNX model searches the left half, while LED 2 / the
+right-eye ONNX model searches the right half. It selects the largest detected
+eye candidate in that half, expands the eye box, and writes a 224×224 eye-only
+video. Detection counts and the median normalized eye box are stored in result
+metadata. The cropper also writes `*_debug_boxes.mp4` full-frame videos beside
+the cropped model inputs; cyan is the detection search region, green is the
+final crop box, blue is the selected detected eye, gray boxes are other
+detections, and orange means a previous box was reused. Disable these with
+`PLR_SAVE_EYE_DEBUG_VIDEO=0`.
+
+Manual ROI mode is still available with `PLR_EYE_CROP_MODE=static`:
 
 - LED 1 uses `PLR_LEFT_EYE_ROI` and the left-eye ONNX model.
 - LED 2 uses `PLR_RIGHT_EYE_ROI` and the right-eye ONNX model.
 
-ROIs use normalized `x,y,width,height` values. Defaults split the camera frame
-into left and right halves. Inspect each session's `cropped/` videos and tune
-the ROIs for the physical camera orientation.
+Static ROIs use normalized `x,y,width,height` values. Defaults split the
+camera frame into left and right halves. Inspect each session's `cropped/`
+videos first if predictions are flat.
 
 Results use pixels and include aggregate metrics plus the full per-frame
 diameter series. See the root README for the initial formulas and mock-mode

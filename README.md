@@ -252,7 +252,7 @@ npx react-native run-ios
 | Camera opens but frames are black         | IR illuminator off, or wrong sensor. `libcamera-hello -t 2000` should show a preview.|
 | LED stays on when it should be off        | Flip that LED's `common_anode` flag in `led_controller.py`.                          |
 | App says "Network request failed"         | Wrong `PI_BASE_URL`, phone on a different Wi-Fi, or firewall blocking port 5000.     |
-| Cropped video misses the eye              | Adjust `PLR_LEFT_EYE_ROI` / `PLR_RIGHT_EYE_ROI`; inspect the session's `cropped/` videos. |
+| Cropped video misses the eye              | Inspect the session's `cropped/` videos. Default crop mode detects eyes; tune lighting/camera position, or use `PLR_EYE_CROP_MODE=static` with manual ROIs. |
 | Inference fails                           | Inspect the session's `session.log` and per-clip error in `session_summary.json`. |
 | Pi gets hot fast                          | Lower `fps` / `bitrate` in `camera_controller.py`, or shorten the session.           |
 | `ModuleNotFoundError: picamera2`          | `sudo apt install -y python3-picamera2 python3-libcamera` (not pip).                 |
@@ -266,16 +266,50 @@ The model training code performs no crop: every training frame is already an
 eye region. The application therefore creates an eye-only video before calling
 the bundled INT8 ONNX inference script.
 
-Default normalized camera ROIs:
+Default crop mode is full-face eye detection:
 
 ```bash
+export PLR_EYE_CROP_MODE="detect"
+```
+
+The backend uses OpenCV's Haar eye detector on each frame, but first limits
+the search to the relevant half of the image: LED 1 / the left-eye model
+searches the left half, and LED 2 / the right-eye model searches the right
+half. It selects the largest detected eye candidate in that half, expands the
+detected box, and writes a 224×224 cropped eye video. Each result records
+detection stats such as
+`detected_frames`, `reused_previous_box_frames`, and the median normalized eye
+box. It also writes an annotated `*_debug_boxes.mp4` beside the cropped video:
+cyan is the half-frame detection search region, green is the final crop box,
+blue is the selected detected eye, gray boxes are other detections, and orange
+means the cropper reused the previous frame's box. Inspect these `cropped/`
+videos first if predictions look flat.
+
+To tune the detection search regions:
+
+```bash
+export PLR_LEFT_EYE_DETECT_ROI="0,0,0.5,1"
+export PLR_RIGHT_EYE_DETECT_ROI="0.5,0,0.5,1"
+```
+
+To disable annotated debug videos:
+
+```bash
+export PLR_SAVE_EYE_DEBUG_VIDEO=0
+```
+
+Manual normalized camera ROIs remain available for fixed-camera fallback or
+already-eye-cropped test videos:
+
+```bash
+export PLR_EYE_CROP_MODE="static"
 export PLR_LEFT_EYE_ROI="0,0,0.5,1"
 export PLR_RIGHT_EYE_ROI="0.5,0,0.5,1"
 ```
 
-The format is `x,y,width,height`, each in the range 0–1. These defaults split
-the image in half and must be verified against the physical camera orientation.
-The exact ROI is recorded in each result.
+The ROI format is `x,y,width,height`, each in the range 0–1. These defaults
+split the image in half and must be verified against the physical camera
+orientation. The exact ROI is recorded in each static-crop result.
 
 Real ONNX inference is the default. To explicitly disable mock mode:
 

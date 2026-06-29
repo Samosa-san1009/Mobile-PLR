@@ -223,6 +223,20 @@ export PLR_MOCK_MODE=0
 Mock mode produces simulated pixel-diameter curves. It does not validate the
 model, crop alignment, or measurement accuracy.
 
+Eye cropping defaults to full-face detection:
+
+```bash
+export PLR_EYE_CROP_MODE=detect
+```
+
+The cropper searches the left half for the left model and the right half for
+the right model, then selects the largest detected eye candidate in that half.
+For fixed ROI fallback or already-eye-cropped test videos:
+
+```bash
+export PLR_EYE_CROP_MODE=static
+```
+
 ---
 
 ## Testing each stage independently
@@ -381,5 +395,5 @@ For a temporary orchestration-only test:
 export PLR_MOCK_MODE=1
 ```
 
-See the root `README.md` for crop ROI configuration and `TESTING.md` for the
-video integration harness.
+See the root `README.md` for detected/static crop configuration and
+`TESTING.md` for the video integration harness.

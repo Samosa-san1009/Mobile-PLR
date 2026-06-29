@@ -19,12 +19,18 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Validate the integrated Mobile-PLR inference pipeline with one video."
     )
-    parser.add_argument("--video", required=True, help="Path to an MP4 containing a visible eye.")
+    parser.add_argument("--video", required=True, help="Path to an MP4 containing a full face or visible eye.")
     parser.add_argument("--eye", choices=["left", "right"], required=True)
     parser.add_argument(
         "--roi",
-        default="0,0,1,1",
-        help="Normalized x,y,width,height crop. Default treats the supplied video as already eye-cropped.",
+        default=None,
+        help="Normalized x,y,width,height crop used only with --crop-mode static.",
+    )
+    parser.add_argument(
+        "--crop-mode",
+        choices=["detect", "static"],
+        default="detect",
+        help="detect uses OpenCV eye detection; static uses --roi. Default: detect.",
     )
     parser.add_argument("--flash-onset", type=float, default=1.0, help="Flash onset within video, seconds.")
     parser.add_argument("--mock", action="store_true", help="Exercise JSON/metrics without ONNX inference.")
@@ -53,8 +59,10 @@ def main():
     clip_path = clip_dir / source.name
     shutil.copy2(source, clip_path)
 
-    roi_env = "PLR_LEFT_EYE_ROI" if eye_index == 1 else "PLR_RIGHT_EYE_ROI"
-    os.environ[roi_env] = args.roi
+    os.environ["PLR_EYE_CROP_MODE"] = args.crop_mode
+    if args.crop_mode == "static":
+        roi_env = "PLR_LEFT_EYE_ROI" if eye_index == 1 else "PLR_RIGHT_EYE_ROI"
+        os.environ[roi_env] = args.roi or "0,0,1,1"
     os.environ["PLR_MOCK_MODE"] = "1" if args.mock else "0"
 
     caller = ModelCaller(
