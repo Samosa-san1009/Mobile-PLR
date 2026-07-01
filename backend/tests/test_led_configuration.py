@@ -76,6 +76,7 @@ class LedConfigurationTests(unittest.TestCase):
     def test_mobile_dual_control_mode_builds_individual_flashes(self):
         config = adapt({
             "participant": {"name": "Test"},
+            "intensity": 72,
             "controlMode": "dual",
             "schedule": {
                 "flashes": [
@@ -84,6 +85,7 @@ class LedConfigurationTests(unittest.TestCase):
                     {"hex": "#0000FF", "duration": 2},
                     {"hex": "#FFFFFF", "duration": 0.1},
                 ],
+                "initialBreak": 8,
                 "gap": 4,
             },
         })
@@ -97,7 +99,10 @@ class LedConfigurationTests(unittest.TestCase):
                 ("#FFFFFF", 100),
             ],
         )
+        self.assertEqual(config["schedule"]["initial_delay_ms"], 8000)
         self.assertEqual(config["schedule"]["gap_ms"], 4000)
+        self.assertEqual(config["schedule"]["intensity_pct"], 72)
+        self.assertEqual(config["schedule"]["flashes"][0]["intensity_pct"], 72)
 
     def test_mobile_left_to_right_control_mode_flashes_both_eyes(self):
         config = adapt({
@@ -106,14 +111,18 @@ class LedConfigurationTests(unittest.TestCase):
                 "rounds": 5,
                 "hex": "#FFFF00",
                 "duration": 0.3,
+                "initialBreak": 120,
                 "innerPause": 0.5,
                 "gap": 3,
+                "intensity": 44,
             },
         })
         self.assertEqual(config["mode"], "left_to_right")
         self.assertEqual(config["schedule"]["rounds"], 5)
+        self.assertEqual(config["schedule"]["initial_delay_ms"], 120000)
         self.assertEqual(config["schedule"]["duration_ms"], 300)
         self.assertEqual(config["schedule"]["inner_pause_ms"], 500)
+        self.assertEqual(config["schedule"]["intensity_pct"], 44)
         self.assertNotIn("active_led", config["schedule"])
 
     def test_mobile_right_to_left_control_mode_flashes_both_eyes(self):
@@ -132,6 +141,25 @@ class LedConfigurationTests(unittest.TestCase):
         self.assertEqual(config["schedule"]["inner_pause_ms"], 2000)
         self.assertEqual(config["schedule"]["gap_ms"], 5000)
         self.assertNotIn("active_led", config["schedule"])
+
+    def test_mobile_timing_fields_are_capped_at_two_minutes(self):
+        config = adapt({
+            "controlMode": "right_to_left",
+            "intensity": 150,
+            "schedule": {
+                "rounds": 1,
+                "hex": "#FFFFFF",
+                "duration": 1,
+                "initialBreak": 999,
+                "innerPause": 999,
+                "gap": 999,
+            },
+        })
+
+        self.assertEqual(config["schedule"]["initial_delay_ms"], 120000)
+        self.assertEqual(config["schedule"]["inner_pause_ms"], 120000)
+        self.assertEqual(config["schedule"]["gap_ms"], 120000)
+        self.assertEqual(config["schedule"]["intensity_pct"], 100)
 
 
 if __name__ == "__main__":

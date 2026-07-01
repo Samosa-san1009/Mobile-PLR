@@ -11,11 +11,12 @@ Mobile request shape (JSON from ConfigScreen):
         "schedule": {
             # dual
             "flashes": [{"hex": "#RRGGBB", "duration": seconds}, ...],
-            "gap": seconds
+            "initialBreak": seconds, "gap": seconds, "intensity": 0..100
               OR
             # sequential
             "rounds": int, "hex": "#RRGGBB", "duration": seconds,
-            "innerPause": seconds, "gap": seconds
+            "initialBreak": seconds, "innerPause": seconds, "gap": seconds,
+            "intensity": 0..100
         },
 
         # Legacy single-eye payload remains accepted:
@@ -35,6 +36,7 @@ Backend config shape (what Orchestrator wants):
         common_anode | led1_common_anode/led2_common_anode: bool,
         mode: "dual" | "left_to_right" | "right_to_left",
         schedule: {
+            initial_delay_ms,
             flashes: [ {hex, duration_ms, intensity_pct}, ... ],   # dual
               or
             rounds, hex, duration_ms, intensity_pct,
@@ -87,8 +89,15 @@ def _hardware_config(payload: dict) -> dict:
     return {**pins, **wiring}
 
 
-def _seconds_to_ms(value, minimum_ms=50):
-    return max(minimum_ms, int(float(value) * 1000))
+def _seconds_to_ms(value, minimum_ms=50, maximum_ms=None):
+    milliseconds = max(minimum_ms, int(float(value) * 1000))
+    if maximum_ms is not None:
+        milliseconds = min(milliseconds, maximum_ms)
+    return milliseconds
+
+
+def _intensity_pct(value):
+    return min(100.0, max(0.0, float(value)))
 
 
 def _validated_hex(value):
@@ -107,7 +116,12 @@ def _adapt_explicit_control_mode(payload: dict, mode: str) -> dict:
         raise ValueError(f"unsupported controlMode: {mode!r}")
 
     incoming = payload.get("schedule") or {}
-    intensity = float(payload.get("intensity", 100.0))
+    intensity = _intensity_pct(incoming.get("intensity", payload.get("intensity", 100.0)))
+    initial_delay_ms = _seconds_to_ms(
+        incoming.get("initialBreak", incoming.get("startBreak", 0.0)),
+        minimum_ms=0,
+        maximum_ms=120000,
+    )
 
     if mode == "dual":
         incoming_flashes = incoming.get("flashes") or []
@@ -117,21 +131,35 @@ def _adapt_explicit_control_mode(payload: dict, mode: str) -> dict:
             {
                 "hex": _validated_hex(flash.get("hex")),
                 "duration_ms": _seconds_to_ms(flash.get("duration", 1.0)),
-                "intensity_pct": intensity,
+                "intensity_pct": _intensity_pct(flash.get("intensity", intensity)),
             }
             for flash in incoming_flashes
         ]
         schedule = {
+            "initial_delay_ms": initial_delay_ms,
             "flashes": flashes,
-            "gap_ms": _seconds_to_ms(incoming.get("gap", 3.0), minimum_ms=3000),
+            "gap_ms": _seconds_to_ms(
+                incoming.get("gap", 3.0),
+                minimum_ms=3000,
+                maximum_ms=120000,
+            ),
+            "intensity_pct": intensity,
         }
     else:
         schedule = {
+            "initial_delay_ms": initial_delay_ms,
             "rounds": max(1, int(incoming.get("rounds", 3))),
             "hex": _validated_hex(incoming.get("hex", "#FFFFFF")),
             "duration_ms": _seconds_to_ms(incoming.get("duration", 1.0)),
-            "inner_pause_ms": _seconds_to_ms(incoming.get("innerPause", 1.0)),
-            "gap_ms": _seconds_to_ms(incoming.get("gap", 3.0), minimum_ms=3000),
+            "inner_pause_ms": _seconds_to_ms(
+                incoming.get("innerPause", 1.0),
+                maximum_ms=120000,
+            ),
+            "gap_ms": _seconds_to_ms(
+                incoming.get("gap", 3.0),
+                minimum_ms=3000,
+                maximum_ms=120000,
+            ),
             "intensity_pct": intensity,
         }
 

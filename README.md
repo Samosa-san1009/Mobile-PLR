@@ -230,6 +230,11 @@ npx react-native run-ios
 2. **Details** — enter participant name, age, sex.
 3. **Config** — choose Dual, Left → Right, or Right → Left and configure
    the mode-specific flash schedule. Tap **Start Experiment**.
+   - Shared controls include a break before the first flash, up to 120 seconds,
+     and an intensity value from 0–100%.
+   - Dual mode supports a break between flashes up to 120 seconds.
+   - Sequential modes support pause between eyes and break between rounds up to
+     120 seconds.
    - The phone POSTs the config to `http://<pi>:5000/session`.
    - The Pi runs the flash sequence while recording IR video.
 4. **Experiment** — looping background while the app polls `/status`.
@@ -327,7 +332,9 @@ Results remain in pixels. No pixel-to-mm conversion is applied.
 
 The initial analysis windows are one second before flash onset and three
 seconds after it. The backend enforces at least a three-second inter-flash gap
-to avoid the next flash contaminating the response window. Initial formulas:
+to avoid the next flash contaminating the response window. Mobile timing
+controls allow up to 120 seconds for pre-start break, pause between eyes, and
+breaks between flashes/rounds. Initial formulas:
 
 - baseline: median of the smoothed pre-flash predictions
 - minimum: minimum smoothed prediction after flash onset

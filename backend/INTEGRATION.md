@@ -75,6 +75,7 @@ Falls back to a mock file on dev machines without picamera2.
 {
   "participant": {"name":"...", "age":30, "sex":"M"},
   "controlMode": "dual" | "left_to_right" | "right_to_left",
+  "intensity": 80,
   "schedule": {}
 }
 ```
@@ -86,21 +87,26 @@ Translation rules (`config_adapter.py`):
 | `controlMode = dual` | Both LEDs flash simultaneously; `schedule.flashes` carries each RGB hex and duration |
 | `controlMode = left_to_right` | LED 1, inner pause, LED 2 for each round |
 | `controlMode = right_to_left` | LED 2, inner pause, LED 1 for each round |
-| `schedule.gap` | Break between flashes/rounds; minimum 3 seconds for analysis |
-| `schedule.innerPause` | Pause between eyes in sequential modes |
+| `intensity` / `schedule.intensity` | 0–100% value carried through the API; current HIGH/LOW GPIO driver does not physically dim without PWM |
+| `schedule.initialBreak` | Break before the first flash; capped at 120 seconds |
+| `schedule.gap` | Break between flashes/rounds; minimum 3 seconds for analysis, capped at 120 seconds |
+| `schedule.innerPause` | Pause between eyes in sequential modes; capped at 120 seconds |
 
 Dual schedule example:
 
 ```json
 {
   "controlMode": "dual",
+  "intensity": 80,
   "schedule": {
     "flashes": [
       {"hex": "#FF0000", "duration": 1.0},
       {"hex": "#00FF00", "duration": 1.0},
       {"hex": "#0000FF", "duration": 1.0}
     ],
-    "gap": 3
+    "initialBreak": 5,
+    "gap": 3,
+    "intensity": 80
   }
 }
 ```
@@ -114,8 +120,10 @@ Sequential schedule example:
     "rounds": 3,
     "hex": "#FFFFFF",
     "duration": 1.0,
+    "initialBreak": 5,
     "innerPause": 1.0,
-    "gap": 3
+    "gap": 3,
+    "intensity": 80
   }
 }
 ```

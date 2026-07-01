@@ -33,6 +33,8 @@ const DEFAULT_FLASHES = [
   {color: 'Blue', hex: '#0000FF', duration: 1},
 ];
 
+const MAX_BREAK_SECONDS = 120;
+
 function ChoiceButton({selected, label, onPress}) {
   return (
     <TouchableOpacity
@@ -100,8 +102,10 @@ export function ConfigScreen({navigation, route}) {
   const [sequentialColor, setSequentialColor] = useState(COLORS[0]);
   const [rounds, setRounds] = useState(3);
   const [duration, setDuration] = useState(1);
+  const [startBreak, setStartBreak] = useState(0);
   const [innerPause, setInnerPause] = useState(1);
   const [gap, setGap] = useState(3);
+  const [intensity, setIntensity] = useState(100);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -137,21 +141,27 @@ export function ConfigScreen({navigation, route}) {
             flashes: dualFlashes.map(flash => ({
               hex: flash.hex,
               duration: flash.duration,
+              intensity,
             })),
+            initialBreak: startBreak,
             gap,
+            intensity,
           }
         : {
             rounds,
             hex: sequentialColor.hex,
             color: sequentialColor.name,
             duration,
+            initialBreak: startBreak,
             innerPause,
             gap,
+            intensity,
           };
 
     const payload = {
       participant: {name: data.Name, age: data.Age, sex: data.Sex},
       controlMode: mode,
+      intensity,
       schedule,
     };
 
@@ -192,6 +202,26 @@ export function ConfigScreen({navigation, route}) {
             onPress={() => setMode(item.id)}
           />
         ))}
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Shared timing and intensity</Text>
+        <ValueSlider
+          label="Break before first flash"
+          value={startBreak}
+          minimum={0}
+          maximum={MAX_BREAK_SECONDS}
+          suffix="s"
+          onChange={setStartBreak}
+        />
+        <ValueSlider
+          label="Intensity"
+          value={intensity}
+          minimum={0}
+          maximum={100}
+          suffix="%"
+          onChange={setIntensity}
+        />
       </View>
 
       {mode === 'dual' ? (
@@ -240,7 +270,7 @@ export function ConfigScreen({navigation, route}) {
             label="Break between flashes"
             value={gap}
             minimum={3}
-            maximum={15}
+            maximum={MAX_BREAK_SECONDS}
             suffix="s"
             onChange={setGap}
           />
@@ -279,7 +309,7 @@ export function ConfigScreen({navigation, route}) {
             label="Pause between eyes"
             value={innerPause}
             minimum={0.1}
-            maximum={10}
+            maximum={MAX_BREAK_SECONDS}
             step={0.1}
             suffix="s"
             onChange={setInnerPause}
@@ -288,7 +318,7 @@ export function ConfigScreen({navigation, route}) {
             label="Break between rounds"
             value={gap}
             minimum={3}
-            maximum={15}
+            maximum={MAX_BREAK_SECONDS}
             suffix="s"
             onChange={setGap}
           />

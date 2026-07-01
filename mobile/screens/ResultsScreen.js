@@ -78,8 +78,10 @@ export function ResultsScreen({route}) {
       </Text>
       {experimentData.controlMode === 'dual' ? (
         <Text style={styles.line}>
-          Flashes: {experimentData.schedule?.flashes?.length || 0} · Break:{' '}
-          {experimentData.schedule?.gap}s
+          Flashes: {experimentData.schedule?.flashes?.length || 0} · Start break:{' '}
+          {experimentData.schedule?.initialBreak}s · Break:{' '}
+          {experimentData.schedule?.gap}s · Intensity:{' '}
+          {experimentData.schedule?.intensity}%
         </Text>
       ) : (
         <>
@@ -91,6 +93,10 @@ export function ResultsScreen({route}) {
             Duration: {experimentData.schedule?.duration}s · Eye pause:{' '}
             {experimentData.schedule?.innerPause}s · Round break:{' '}
             {experimentData.schedule?.gap}s
+          </Text>
+          <Text style={styles.line}>
+            Start break: {experimentData.schedule?.initialBreak}s · Intensity:{' '}
+            {experimentData.schedule?.intensity}%
           </Text>
         </>
       )}

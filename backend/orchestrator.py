@@ -54,6 +54,10 @@ class Orchestrator:
         recording_path = self.camera.start()
         # The initial PLR formulas use one second of pre-flash baseline.
         time.sleep(float(self.config.get("pre_roll_s", 1.0)))
+        initial_delay_s = float(self.sched.get("initial_delay_ms", 0)) / 1000.0
+        if initial_delay_s > 0:
+            print(f"  [Orchestrator] Waiting {initial_delay_s:.1f}s before first flash...")
+            time.sleep(initial_delay_s)
 
         print("  [Orchestrator] Beginning flash sequence...\n")
 

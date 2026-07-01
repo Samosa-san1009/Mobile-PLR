@@ -24,22 +24,44 @@ class FakeLed:
 
 class FakeLedController:
     def __init__(self, events):
+        self.events = events
         self.led1 = FakeLed(1, events)
         self.led2 = FakeLed(2, events)
 
     def get_led(self, index):
         return self.led1 if index == 1 else self.led2
 
+    def cleanup(self):
+        self.events.append(("cleanup",))
+
+
+class FakeCamera:
+    def __init__(self, events):
+        self.events = events
+
+    def start(self):
+        self.events.append(("camera_start",))
+        return "recording.mp4"
+
+    def stop(self):
+        self.events.append(("camera_stop",))
+
+    def offset_of(self, timestamp):
+        return timestamp
+
 
 def make_orchestrator(schedule):
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.sched = schedule
+    orchestrator.mode = "dual"
+    orchestrator.config = {"pre_roll_s": 1.0, "post_roll_s": 3.0}
     orchestrator.hex_queue_1 = queue.Queue()
     orchestrator.ts_queue_1 = queue.Queue()
     orchestrator.hex_queue_2 = queue.Queue()
     orchestrator.ts_queue_2 = queue.Queue()
     orchestrator.events = []
     orchestrator.leds = FakeLedController(orchestrator.events)
+    orchestrator.camera = FakeCamera(orchestrator.events)
     return orchestrator
 
 
@@ -90,6 +112,21 @@ class TerminalWizardTests(unittest.TestCase):
 
 
 class OrchestratorControlModeTests(unittest.TestCase):
+    def test_run_waits_initial_delay_before_first_flash_sequence(self):
+        orchestrator = make_orchestrator({
+            "initial_delay_ms": 120000,
+            "flashes": [{"hex": "#FF0000", "duration_ms": 100}],
+            "gap_ms": 800,
+        })
+
+        sleeps = []
+        with patch("orchestrator.time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+            orchestrator.run()
+
+        self.assertEqual(sleeps[:2], [1.0, 120.0])
+        self.assertIn(("flash", 1, "#FF0000", 100), orchestrator.events)
+        self.assertIn(("flash", 2, "#FF0000", 100), orchestrator.events)
+
     def test_dual_flashes_both_leds_for_every_configured_flash(self):
         orchestrator = make_orchestrator({
             "flashes": [
