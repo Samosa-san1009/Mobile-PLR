@@ -39,7 +39,7 @@ from flask import Flask, request, jsonify
 from config_adapter import adapt
 from orchestrator   import Orchestrator
 from segmenter      import Segmenter
-from model_caller   import ModelCaller
+from purest_caller   import PuReCaller
 
 
 app = Flask(__name__)
