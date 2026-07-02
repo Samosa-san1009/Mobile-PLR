@@ -19,7 +19,7 @@ import traceback
 from config_wizard   import run_wizard
 from orchestrator    import Orchestrator
 from segmenter       import Segmenter
-from model_caller    import ModelCaller
+from purest_caller    import PuReCaller
 
 
 def main():
@@ -71,7 +71,7 @@ def main():
     # ── 4. Model inference ────────────────────────────────────────────────────
     print("\n  ── Running model inference ─────────────────────────")
 
-    caller = ModelCaller(
+    caller = PuReCaller(
         clips_root="clips",
         results_dir="results",
         cropped_dir="cropped",
