@@ -8,7 +8,7 @@
 
 import RNFS from 'react-native-fs';
 
-export const PI_BASE_URL = 'http://eyezer.local:5000';   // ← change me
+export const PI_BASE_URL = 'http://10.2.140.209:5000';   // ← change me
 
 const SESSION_DIR = `${RNFS.DownloadDirectoryPath}/eyezer`;
 
