@@ -158,7 +158,7 @@ def _run_pipeline(config: dict, paths: dict):
                 },
             )
 
-        caller = ModelCaller(
+        caller = PuReCaller(
             clips_root=str(paths["clips"]),
             results_dir=str(paths["results"]),
             cropped_dir=str(paths["cropped"]),
