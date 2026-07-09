@@ -1,131 +1,264 @@
 """
-camera_controller.py
---------------------
-IR Pi Camera Module (CSI ribbon) on Raspberry Pi 4, via picamera2.
+led_controller.py
+-----------------
+Controls two 4-pin RGB LEDs via GPIO, now using SOFTWARE PWM instead of
+plain HIGH/LOW output.
 
-Designed for a passively cooled Pi 4 with a single IR cam that
-heats up quickly:
-  • low resolution (640x480) and modest fps (24)
-  • H.264 hardware encoder via libcamera (no CPU re-encode)
-  • camera is only powered up while record_session() is running
-    and is fully released as soon as the flash sequence ends
+WHY THIS CHANGED FROM THE ORIGINAL VERSION:
+The previous version drove each channel with GPIO.output(pin, HIGH/LOW)
+only, so `brightness` was accepted but silently ignored (see the old
+flash() docstring), and every color collapsed into one of 8 pure on/off
+combinations. This version PWMs each of the 6 channel pins, so:
+  - intensity_pct from the app actually changes LED brightness
+  - each channel gets a continuous 0-255 -> 0-100% duty cycle, so many
+    more colors are reachable, not just the 8 primaries
+  - a per-LED calibration multiplier lets you make LED1 and LED2 match
+    perceptually for "the same" nominal hex color (see LED*_CALIBRATION
+    below -- these are placeholders, tune them by eye against a spectro
+    or just visually side-by-side)
 
-A small mock recorder is provided automatically when picamera2
-is not available (dev machines, CI), so the rest of the pipeline
-remains testable.
+CONFIRMED HARDWARE WIRING (unchanged from before):
+  LED1 (left)  — common CATHODE → common pin to GND   → HIGH = more ON
+  LED2 (right) — common ANODE   → common pin to 3.3V  → LOW  = more ON
+
+IMPORTANT CAVEAT -- PLEASE TEST THIS ON THE PI BEFORE TRUSTING IT:
+RPi.GPIO's software PWM runs its timing in a background thread on the
+CPU, not via a hardware timer/DMA like `pigpio` would. Flash *duration*
+timing (t_on/t_off, which segmenter.py uses to sync video frames) is
+untouched -- it still uses time.sleep() exactly as before -- but the
+*color/brightness* signal itself could show visible flicker or add CPU
+jitter while it's running concurrently with active H264 encoding during
+a session. Watch for this specifically during a real recording. If it's
+a problem, the fix is to switch this file to `pigpio` (hardware-timed
+PWM, off the main CPU) or move to an external PWM driver like a PCA9685
+I2C board -- both are drop-in replacements for the _duty_for_on_fraction
+/ ChangeDutyCycle plumbing below, nothing else in the pipeline needs to
+change.
+
+A small mock GPIO/PWM shim is provided when RPi.GPIO isn't available
+(dev machines, CI), matching the pattern used elsewhere in this repo.
 """
 
-import os
 import time
-import threading
 
 try:
-    from picamera2 import Picamera2
-    from picamera2.encoders import H264Encoder
-    from picamera2.outputs import FfmpegOutput
-    _PICAM_AVAILABLE = True
+    import RPi.GPIO as GPIO
+    _GPIO_AVAILABLE = True
 except ImportError:
-    _PICAM_AVAILABLE = False
+    class _MockPWM:
+        def __init__(self, pin, freq):
+            pass
+
+        def start(self, duty_cycle):
+            pass
+
+        def ChangeDutyCycle(self, duty_cycle):
+            pass
+
+        def stop(self):
+            pass
+
+    class _GPIO:
+        BCM = BOARD = OUT = IN = HIGH = 1
+        LOW = 0
+
+        def setmode(self, mode): pass
+        def setup(self, pin, mode, initial=1): pass
+        def output(self, pin, value): pass
+        def cleanup(self): pass
+        def setwarnings(self, value): pass
+
+        def PWM(self, pin, freq):
+            return _MockPWM(pin, freq)
+
+    GPIO = _GPIO()
+    _GPIO_AVAILABLE = False
 
 
-class CameraController:
-    """
-    Starts the IR camera, records a single continuous video,
-    and exposes offset_of() so the segmenter can convert absolute
-    timestamps into video-relative offsets.
-    """
+# Software PWM frequency. RPi.GPIO software PWM gets noticeably jittery
+# above ~1kHz on a Pi 4; 400-500Hz is a safe, flicker-free starting point
+# for LEDs. Raise cautiously and re-test if you want smoother dimming.
+PWM_FREQUENCY_HZ = 500
 
-    def __init__(self, output_dir: str = "recordings",
-                 fps: int = 24, resolution: tuple = (640, 480)):
-        self.output_dir = output_dir
-        self.fps        = fps
-        self.resolution = resolution
 
-        self._picam   = None
-        self._encoder = None
-        self._output  = None
+DEFAULT_CONFIG = {
+    "led1_common_anode": False,
+    "led1_r": 17,
+    "led1_g": 27,
+    "led1_b": 22,
+    "led2_common_anode": True,
+    "led2_r": 23,
+    "led2_g": 24,
+    "led2_b": 25,
+    # ── color calibration ────────────────────────────────────────────────
+    # Per-channel multipliers (0.0-1.0) applied on top of the requested
+    # color/brightness, per LED. Use these to make LED1 and LED2 *look*
+    # the same for "the same" nominal hex color, since they're physically
+    # different parts (different die, common-anode vs common-cathode,
+    # possibly different forward voltage/luminous output at full current).
+    # Start at 1.0 for both and reduce the brighter LED's channels while
+    # looking at both LEDs side by side until they visually match at a
+    # few reference colors (pure red, pure white are good starting points).
+    "led1_calibration": {"r": 1.0, "g": 1.0, "b": 1.0},
+    "led2_calibration": {"r": 1.0, "g": 1.0, "b": 1.0},
+}
 
-        self.recording_start_time: float = None
-        self.output_path: str = None
-        self._mock_thread = None
-        self._mock_stop = threading.Event()
+# Compatibility aliases used by the mobile config adapter and older callers.
+DEFAULT_PINS = {
+    key: value for key, value in DEFAULT_CONFIG.items() if key.endswith(("_r", "_g", "_b"))
+}
+DEFAULT_COMMON_ANODE = {
+    "led1": DEFAULT_CONFIG["led1_common_anode"],
+    "led2": DEFAULT_CONFIG["led2_common_anode"],
+}
 
-        os.makedirs(self.output_dir, exist_ok=True)
 
-    # ── public API ────────────────────────────────────────────────────────────
+class RGBLed:
+    def __init__(
+        self,
+        r_pin: int,
+        g_pin: int,
+        b_pin: int,
+        common_anode: bool = False,
+        name: str = "LED",
+        calibration: dict = None,
+    ):
+        self.pins = {"r": r_pin, "g": g_pin, "b": b_pin}
+        self.common_anode = common_anode
+        self.name = name
+        self.calibration = calibration or {"r": 1.0, "g": 1.0, "b": 1.0}
+        self._pwm = {}
+        self._setup()
 
-    def start(self) -> str:
-        """Power up camera, begin recording. Returns the output file path."""
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        self.output_path = os.path.join(
-            self.output_dir, f"full_recording_{timestamp}.mp4"
-        )
+    def _duty_for_on_fraction(self, on_fraction: float) -> float:
+        """Map a logical 0.0 (off) .. 1.0 (fully on) value to the PWM
+        duty cycle percentage, accounting for common-anode vs
+        common-cathode wiring polarity."""
+        on_fraction = max(0.0, min(1.0, on_fraction))
+        if self.common_anode:
+            # LOW = on, so the pin should be HIGH for the "off" fraction
+            # of the cycle -- duty cycle (percent time HIGH) is inverted.
+            return (1.0 - on_fraction) * 100.0
+        return on_fraction * 100.0
 
-        if _PICAM_AVAILABLE:
-            self._start_picamera()
-        else:
-            self._start_mock()
+    def _setup(self):
+        # Initialize pins in their OFF state before starting PWM, same
+        # startup-flash avoidance as the original version.
+        off_level = GPIO.HIGH if self.common_anode else GPIO.LOW
+        for channel, pin in self.pins.items():
+            GPIO.setup(pin, GPIO.OUT, initial=off_level)
+            pwm = GPIO.PWM(pin, PWM_FREQUENCY_HZ)
+            pwm.start(self._duty_for_on_fraction(0.0))
+            self._pwm[channel] = pwm
 
-        print(f"  [Camera] Recording started → {self.output_path}")
-        return self.output_path
+    def _set_channel(self, channel: str, on_fraction: float):
+        on_fraction = max(0.0, min(1.0, on_fraction)) * self.calibration.get(channel, 1.0)
+        self._pwm[channel].ChangeDutyCycle(self._duty_for_on_fraction(on_fraction))
 
-    def stop(self):
-        """Stop recording and fully release the camera ASAP (heat management)."""
-        if _PICAM_AVAILABLE and self._picam is not None:
+    def set_color(self, r: float, g: float, b: float, brightness: float = 100.0):
+        """Set each channel from a 0.0-1.0 fraction, scaled by an overall
+        brightness percentage (0-100)."""
+        scale = max(0.0, min(100.0, brightness)) / 100.0
+        self._set_channel("r", r * scale)
+        self._set_channel("g", g * scale)
+        self._set_channel("b", b * scale)
+
+    def set_hex(self, hex_color: str, brightness: float = 100.0):
+        value = hex_color.lstrip("#")
+        if len(value) != 6:
+            raise ValueError(f"Expected six-digit RGB hex color, got {hex_color!r}")
+        red = int(value[0:2], 16) / 255.0
+        green = int(value[2:4], 16) / 255.0
+        blue = int(value[4:6], 16) / 255.0
+        self.set_color(red, green, blue, brightness)
+
+    def off(self):
+        for channel in self.pins:
+            self._set_channel(channel, 0.0)
+
+    def safe_release(self):
+        self.off()
+        for pwm in self._pwm.values():
             try:
-                self._picam.stop_recording()
-            finally:
-                try:
-                    self._picam.close()
-                except Exception:
-                    pass
-                self._picam = None
-                self._encoder = None
-                self._output = None
-        else:
-            self._mock_stop.set()
-            if self._mock_thread:
-                self._mock_thread.join(timeout=2)
+                pwm.stop()
+            except Exception:
+                pass
 
-        print(f"  [Camera] Recording saved   → {self.output_path}")
+    def flash(self, hex_color: str, duration_ms: int, brightness: int = 100) -> tuple:
+        """
+        Flash for ``duration_ms`` milliseconds at ``brightness`` percent
+        (0-100). Timing is unchanged from before -- t_on/t_off still come
+        straight from time.time()/time.sleep(), so segmenter.py's video
+        sync math doesn't need to change.
+        """
+        self.set_hex(hex_color, brightness)
+        t_on = time.time()
+        time.sleep(duration_ms / 1000.0)
+        t_off = time.time()
+        self.off()
+        return t_on, t_off
 
-    def offset_of(self, unix_timestamp: float) -> float:
-        if self.recording_start_time is None:
-            raise RuntimeError("Recording has not started yet.")
-        return max(0.0, unix_timestamp - self.recording_start_time)
 
-    # ── picamera2 path ────────────────────────────────────────────────────────
+class LedController:
+    def __init__(self, config: dict):
+        cfg = {**DEFAULT_CONFIG, **config}
 
-    def _start_picamera(self):
-        self._picam = Picamera2()
+        # Accept the prior application's per-LED key names during migration.
+        if "common_anode_led1" in config and "led1_common_anode" not in config:
+            cfg["led1_common_anode"] = bool(config["common_anode_led1"])
+        if "common_anode_led2" in config and "led2_common_anode" not in config:
+            cfg["led2_common_anode"] = bool(config["common_anode_led2"])
+        if "common_anode" in config:
+            cfg["led1_common_anode"] = bool(config["common_anode"])
+            cfg["led2_common_anode"] = bool(config["common_anode"])
 
-        # Video configuration tuned for low heat / low CPU.
-        # The IR module typically reports as a normal sensor — IR cut handled
-        # at the optical filter, not in software.
-        video_cfg = self._picam.create_video_configuration(
-            main={"size": self.resolution, "format": "RGB888"},
-            controls={"FrameRate": float(self.fps)},
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+
+        self.led1 = RGBLed(
+            r_pin=cfg["led1_r"],
+            g_pin=cfg["led1_g"],
+            b_pin=cfg["led1_b"],
+            common_anode=cfg["led1_common_anode"],
+            name="LED1",
+            calibration=cfg.get("led1_calibration"),
         )
-        self._picam.configure(video_cfg)
+        self.led2 = RGBLed(
+            r_pin=cfg["led2_r"],
+            g_pin=cfg["led2_g"],
+            b_pin=cfg["led2_b"],
+            common_anode=cfg["led2_common_anode"],
+            name="LED2",
+            calibration=cfg.get("led2_calibration"),
+        )
 
-        self._encoder = H264Encoder(bitrate=2_000_000)         # 2 Mbps is enough at 640x480
-        self._output  = FfmpegOutput(self.output_path)         # MP4 container via ffmpeg
+        def wiring(common_anode):
+            if common_anode:
+                return "common anode  (pin→3.3V, LOW=ON)"
+            return "common cathode (pin→GND, HIGH=ON)"
 
-        self._picam.start_recording(self._encoder, self._output)
-        self.recording_start_time = time.time()
+        print(
+            f"  [LEDController] LED1  {wiring(cfg['led1_common_anode'])}  "
+            f"R={cfg['led1_r']} G={cfg['led1_g']} B={cfg['led1_b']}  PWM@{PWM_FREQUENCY_HZ}Hz"
+        )
+        print(
+            f"  [LEDController] LED2  {wiring(cfg['led2_common_anode'])}  "
+            f"R={cfg['led2_r']} G={cfg['led2_g']} B={cfg['led2_b']}  PWM@{PWM_FREQUENCY_HZ}Hz"
+        )
 
-    # ── mock path (no Pi camera available) ────────────────────────────────────
+    def get_led(self, led_index: int) -> RGBLed:
+        if led_index == 1:
+            return self.led1
+        if led_index == 2:
+            return self.led2
+        raise ValueError(f"Invalid LED index: {led_index}. Must be 1 or 2.")
 
-    def _start_mock(self):
-        """Create an empty placeholder file and record a wall-clock start time."""
-        self.recording_start_time = time.time()
-        self._mock_stop.clear()
+    def all_off(self):
+        self.led1.off()
+        self.led2.off()
 
-        def _writer():
-            with open(self.output_path, "wb") as f:
-                f.write(b"")
-            self._mock_stop.wait()
-
-        self._mock_thread = threading.Thread(target=_writer, daemon=True)
-        self._mock_thread.start()
-        print("  [Camera] (mock) picamera2 not available — placeholder file only.")
+    def cleanup(self):
+        self.led1.safe_release()
+        self.led2.safe_release()
+        GPIO.cleanup()
+        print("  [LEDController] GPIO cleaned up.")
