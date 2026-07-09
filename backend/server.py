@@ -40,6 +40,7 @@ from config_adapter import adapt
 from orchestrator   import Orchestrator
 from segmenter      import Segmenter
 from purest_caller   import PuReCaller
+import camera_service
 
 
 app = Flask(__name__)
@@ -273,6 +274,15 @@ def results():
 # ── entry point ──────────────────────────────────────────────────────────────
 
 def main():
+    # Open the camera + on-monitor preview window at boot, so alignment
+    # is visible immediately -- not just after the first /session call.
+    # Recording sessions reuse this same camera instance (see
+    # camera_controller.py / camera_service.py).
+    try:
+        camera_service.ensure_started()
+    except RuntimeError as e:
+        print(f"  [server] camera/preview could not start at boot: {e}")
+
     # The server remains alive and responsive while ONNX inference runs.
     app.run(host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
 
