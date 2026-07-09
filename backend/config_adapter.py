@@ -89,6 +89,21 @@ def _hardware_config(payload: dict) -> dict:
     return {**pins, **wiring}
 
 
+def _camera_config(payload: dict) -> dict:
+    """Build the camera config block. Resolution/fps are optional --
+    omit them from the payload's "camera" key to keep the backend's
+    defaults (env vars PLR_CAMERA_RESOLUTION / PLR_CAMERA_FPS, or
+    640x480@24 if those aren't set either)."""
+    cam_in = payload.get("camera") or {}
+    cfg = {"output_dir": "recordings"}
+    if "resolution" in cam_in:
+        width, height = cam_in["resolution"]
+        cfg["resolution"] = [int(width), int(height)]
+    if "fps" in cam_in:
+        cfg["fps"] = int(cam_in["fps"])
+    return cfg
+
+
 def _seconds_to_ms(value, minimum_ms=50, maximum_ms=None):
     milliseconds = max(minimum_ms, int(float(value) * 1000))
     if maximum_ms is not None:
@@ -167,7 +182,7 @@ def _adapt_explicit_control_mode(payload: dict, mode: str) -> dict:
         **_hardware_config(payload),
         "mode": mode,
         "schedule": schedule,
-        "camera": {"output_dir": "recordings"},
+        "camera": _camera_config(payload),
         "participant": payload.get("participant", {}),
         "pre_roll_s": 1.0,
         "post_roll_s": 3.0,
@@ -231,7 +246,7 @@ def _adapt_legacy_mobile_payload(payload: dict) -> dict:
         **_hardware_config(payload),
         "mode":     mode,
         "schedule": schedule,
-        "camera":   {"output_dir": "recordings"},
+        "camera":   _camera_config(payload),
         "participant": payload.get("participant", {}),
         "pre_roll_s": 1.0,
         "post_roll_s": 3.0,
