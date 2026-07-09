@@ -1,21 +1,63 @@
 """
 led_controller.py
 -----------------
-Controls two 4-pin RGB LEDs via GPIO HIGH/LOW.
+Controls two 4-pin RGB LEDs via GPIO, now using SOFTWARE PWM instead of
+plain HIGH/LOW output.
 
-CONFIRMED HARDWARE WIRING:
-  LED1 (left)  — common CATHODE → common pin to GND   → HIGH = ON
-  LED2 (right) — common ANODE   → common pin to 3.3V  → LOW  = ON
+WHY THIS CHANGED FROM THE ORIGINAL VERSION:
+The previous version drove each channel with GPIO.output(pin, HIGH/LOW)
+only, so `brightness` was accepted but silently ignored (see the old
+flash() docstring), and every color collapsed into one of 8 pure on/off
+combinations. This version PWMs each of the 6 channel pins, so:
+  - intensity_pct from the app actually changes LED brightness
+  - each channel gets a continuous 0-255 -> 0-100% duty cycle, so many
+    more colors are reachable, not just the 8 primaries
+  - a per-LED calibration multiplier lets you make LED1 and LED2 match
+    perceptually for "the same" nominal hex color (see LED*_CALIBRATION
+    below -- these are placeholders, tune them by eye against a spectro
+    or just visually side-by-side)
 
-Each LED has its own common_anode flag so they can be wired differently.
-Pins are initialized directly in their OFF state to avoid startup flashes.
+CONFIRMED HARDWARE WIRING (unchanged from before):
+  LED1 (left)  — common CATHODE → common pin to GND   → HIGH = more ON
+  LED2 (right) — common ANODE   → common pin to 3.3V  → LOW  = more ON
+
+IMPORTANT CAVEAT -- PLEASE TEST THIS ON THE PI BEFORE TRUSTING IT:
+RPi.GPIO's software PWM runs its timing in a background thread on the
+CPU, not via a hardware timer/DMA like `pigpio` would. Flash *duration*
+timing (t_on/t_off, which segmenter.py uses to sync video frames) is
+untouched -- it still uses time.sleep() exactly as before -- but the
+*color/brightness* signal itself could show visible flicker or add CPU
+jitter while it's running concurrently with active H264 encoding during
+a session. Watch for this specifically during a real recording. If it's
+a problem, the fix is to switch this file to `pigpio` (hardware-timed
+PWM, off the main CPU) or move to an external PWM driver like a PCA9685
+I2C board -- both are drop-in replacements for the _duty_for_on_fraction
+/ ChangeDutyCycle plumbing below, nothing else in the pipeline needs to
+change.
+
+A small mock GPIO/PWM shim is provided when RPi.GPIO isn't available
+(dev machines, CI), matching the pattern used elsewhere in this repo.
 """
 
 import time
 
 try:
     import RPi.GPIO as GPIO
+    _GPIO_AVAILABLE = True
 except ImportError:
+    class _MockPWM:
+        def __init__(self, pin, freq):
+            pass
+
+        def start(self, duty_cycle):
+            pass
+
+        def ChangeDutyCycle(self, duty_cycle):
+            pass
+
+        def stop(self):
+            pass
+
     class _GPIO:
         BCM = BOARD = OUT = IN = HIGH = 1
         LOW = 0
@@ -26,7 +68,17 @@ except ImportError:
         def cleanup(self): pass
         def setwarnings(self, value): pass
 
+        def PWM(self, pin, freq):
+            return _MockPWM(pin, freq)
+
     GPIO = _GPIO()
+    _GPIO_AVAILABLE = False
+
+
+# Software PWM frequency. RPi.GPIO software PWM gets noticeably jittery
+# above ~1kHz on a Pi 4; 400-500Hz is a safe, flicker-free starting point
+# for LEDs. Raise cautiously and re-test if you want smoother dimming.
+PWM_FREQUENCY_HZ = 500
 
 
 DEFAULT_CONFIG = {
@@ -38,6 +90,17 @@ DEFAULT_CONFIG = {
     "led2_r": 23,
     "led2_g": 24,
     "led2_b": 25,
+    # ── color calibration ────────────────────────────────────────────────
+    # Per-channel multipliers (0.0-1.0) applied on top of the requested
+    # color/brightness, per LED. Use these to make LED1 and LED2 *look*
+    # the same for "the same" nominal hex color, since they're physically
+    # different parts (different die, common-anode vs common-cathode,
+    # possibly different forward voltage/luminous output at full current).
+    # Start at 1.0 for both and reduce the brighter LED's channels while
+    # looking at both LEDs side by side until they visually match at a
+    # few reference colors (pure red, pure white are good starting points).
+    "led1_calibration": {"r": 1.0, "g": 1.0, "b": 1.0},
+    "led2_calibration": {"r": 1.0, "g": 1.0, "b": 1.0},
 }
 
 # Compatibility aliases used by the mobile config adapter and older callers.
@@ -58,53 +121,77 @@ class RGBLed:
         b_pin: int,
         common_anode: bool = False,
         name: str = "LED",
+        calibration: dict = None,
     ):
         self.pins = {"r": r_pin, "g": g_pin, "b": b_pin}
         self.common_anode = common_anode
         self.name = name
+        self.calibration = calibration or {"r": 1.0, "g": 1.0, "b": 1.0}
+        self._pwm = {}
         self._setup()
 
-    def _on_level(self):
-        return GPIO.LOW if self.common_anode else GPIO.HIGH
-
-    def _off_level(self):
-        return GPIO.HIGH if self.common_anode else GPIO.LOW
+    def _duty_for_on_fraction(self, on_fraction: float) -> float:
+        """Map a logical 0.0 (off) .. 1.0 (fully on) value to the PWM
+        duty cycle percentage, accounting for common-anode vs
+        common-cathode wiring polarity."""
+        on_fraction = max(0.0, min(1.0, on_fraction))
+        if self.common_anode:
+            # LOW = on, so the pin should be HIGH for the "off" fraction
+            # of the cycle -- duty cycle (percent time HIGH) is inverted.
+            return (1.0 - on_fraction) * 100.0
+        return on_fraction * 100.0
 
     def _setup(self):
-        off = self._off_level()
-        for pin in self.pins.values():
-            GPIO.setup(pin, GPIO.OUT, initial=off)
+        # Initialize pins in their OFF state before starting PWM, same
+        # startup-flash avoidance as the original version.
+        off_level = GPIO.HIGH if self.common_anode else GPIO.LOW
+        for channel, pin in self.pins.items():
+            GPIO.setup(pin, GPIO.OUT, initial=off_level)
+            pwm = GPIO.PWM(pin, PWM_FREQUENCY_HZ)
+            pwm.start(self._duty_for_on_fraction(0.0))
+            self._pwm[channel] = pwm
 
-    def set_color(self, r: bool, g: bool, b: bool):
-        GPIO.output(self.pins["r"], self._on_level() if r else self._off_level())
-        GPIO.output(self.pins["g"], self._on_level() if g else self._off_level())
-        GPIO.output(self.pins["b"], self._on_level() if b else self._off_level())
+    def _set_channel(self, channel: str, on_fraction: float):
+        on_fraction = max(0.0, min(1.0, on_fraction)) * self.calibration.get(channel, 1.0)
+        self._pwm[channel].ChangeDutyCycle(self._duty_for_on_fraction(on_fraction))
 
-    def set_hex(self, hex_color: str):
+    def set_color(self, r: float, g: float, b: float, brightness: float = 100.0):
+        """Set each channel from a 0.0-1.0 fraction, scaled by an overall
+        brightness percentage (0-100)."""
+        scale = max(0.0, min(100.0, brightness)) / 100.0
+        self._set_channel("r", r * scale)
+        self._set_channel("g", g * scale)
+        self._set_channel("b", b * scale)
+
+    def set_hex(self, hex_color: str, brightness: float = 100.0):
         value = hex_color.lstrip("#")
         if len(value) != 6:
             raise ValueError(f"Expected six-digit RGB hex color, got {hex_color!r}")
-        red = int(value[0:2], 16) >= 128
-        green = int(value[2:4], 16) >= 128
-        blue = int(value[4:6], 16) >= 128
-        self.set_color(red, green, blue)
+        red = int(value[0:2], 16) / 255.0
+        green = int(value[2:4], 16) / 255.0
+        blue = int(value[4:6], 16) / 255.0
+        self.set_color(red, green, blue, brightness)
 
     def off(self):
-        off = self._off_level()
-        for pin in self.pins.values():
-            GPIO.output(pin, off)
+        for channel in self.pins:
+            self._set_channel(channel, 0.0)
 
     def safe_release(self):
         self.off()
+        for pwm in self._pwm.values():
+            try:
+                pwm.stop()
+            except Exception:
+                pass
 
     def flash(self, hex_color: str, duration_ms: int, brightness: int = 100) -> tuple:
         """
-        Flash for ``duration_ms`` milliseconds.
-
-        ``brightness`` is accepted for API compatibility but ignored because
-        this timing-safe controller uses direct HIGH/LOW output, not PWM.
+        Flash for ``duration_ms`` milliseconds at ``brightness`` percent
+        (0-100). Timing is unchanged from before -- t_on/t_off still come
+        straight from time.time()/time.sleep(), so segmenter.py's video
+        sync math doesn't need to change.
         """
-        self.set_hex(hex_color)
+        self.set_hex(hex_color, brightness)
         t_on = time.time()
         time.sleep(duration_ms / 1000.0)
         t_off = time.time()
@@ -134,6 +221,7 @@ class LedController:
             b_pin=cfg["led1_b"],
             common_anode=cfg["led1_common_anode"],
             name="LED1",
+            calibration=cfg.get("led1_calibration"),
         )
         self.led2 = RGBLed(
             r_pin=cfg["led2_r"],
@@ -141,6 +229,7 @@ class LedController:
             b_pin=cfg["led2_b"],
             common_anode=cfg["led2_common_anode"],
             name="LED2",
+            calibration=cfg.get("led2_calibration"),
         )
 
         def wiring(common_anode):
@@ -150,11 +239,11 @@ class LedController:
 
         print(
             f"  [LEDController] LED1  {wiring(cfg['led1_common_anode'])}  "
-            f"R={cfg['led1_r']} G={cfg['led1_g']} B={cfg['led1_b']}"
+            f"R={cfg['led1_r']} G={cfg['led1_g']} B={cfg['led1_b']}  PWM@{PWM_FREQUENCY_HZ}Hz"
         )
         print(
             f"  [LEDController] LED2  {wiring(cfg['led2_common_anode'])}  "
-            f"R={cfg['led2_r']} G={cfg['led2_g']} B={cfg['led2_b']}"
+            f"R={cfg['led2_r']} G={cfg['led2_g']} B={cfg['led2_b']}  PWM@{PWM_FREQUENCY_HZ}Hz"
         )
 
     def get_led(self, led_index: int) -> RGBLed:
