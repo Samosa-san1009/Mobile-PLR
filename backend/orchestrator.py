@@ -41,8 +41,11 @@ class Orchestrator:
         self.ts_queue_2:  queue.Queue = queue.Queue()
 
         self.leds   = LedController(config)
+        cam_cfg     = config.get("camera", {})
         self.camera = CameraController(
-            output_dir=config["camera"].get("output_dir", "recordings"),
+            output_dir=cam_cfg.get("output_dir", "recordings"),
+            fps=cam_cfg.get("fps"),
+            resolution=cam_cfg.get("resolution"),
         )
 
     # ── public ────────────────────────────────────────────────────────────────
